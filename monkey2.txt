@@ -1,0 +1,834 @@
+---
+
+## `window_gen.py`
+
+**Role:** core configuration (window source)
+
+**Purpose:**
+Generate a canonical **Gaussian notched window config** JSON with `(mode, sigma, k0)` and meta (tool, dps, sha256).
+
+**CLI:**
+
+* `--mode` (str, required, choices: `gauss`)
+* `--sigma` (str, required) – Gaussian width, `sigma > 0`
+* `--k0` (str, required) – notch location, `k0 > 0`
+* `--dps` (int, optional, default 220)
+* `--out` (str, required) – output JSON path
+
+**Output:**
+
+* `window.json` (`kind = "window"`)
+
+  * `mode`, `sigma`, `k0` (strings)
+  * `window.mode`, `window.sigma`, `window.k0`
+  * `meta.tool = "window_gen"`, `meta.dps`, `meta.created_utc`, `meta.sha256`
+
+**Dependencies:**
+
+* Reads: none
+* Writes: `window.json` used by `bands_make.py`, `weil_kernel.py`, `bochner_psd_cert.py` and any tool expecting a canonical window config.
+
+---
+
+## `bands_make.py`
+
+**Role:** core spectrum decomposition
+
+**Purpose:**
+Build band decomposition / grid for the windowed spectrum and emit a **band certificate** input structure for later certification.
+
+**CLI (normalized intent):**
+
+* `--window-config` (str, required) – path to `window.json`
+* `--grid` (int, required) – number of sample points
+* `--T0` / `--T-max` / similar (numbers/str) – spectral height parameters (exact flags from code)
+* `--out` (str, required) – band data / proto-cert JSON
+* `--dps` (int, optional, default ~220)
+
+**Output (typical):**
+
+* `bands.json` or `bands_data.json` (`kind = "bands"`)
+
+  * band endpoints, grids, margins, normalization data
+  * meta tool / dps / sha256
+
+**Dependencies:**
+
+* Reads: `window.json`
+* Writes: band data consumed by `band_cert.py` and downstream rollups.
+
+---
+
+## `band_cert.py`
+
+**Role:** band margin certificate
+
+**Purpose:**
+Take band data from `bands_make.py` and prove a **lower bound** on the band margin (spectral gap) over the relevant range.
+
+**CLI:**
+
+* `--bands` / `--bands-json` (str, required) – bands input JSON
+* `--out` (str, required) – `band_cert.json`
+* `--dps` (int, optional, high precision)
+
+**Output:**
+
+* `band_cert.json` (`kind = "band_cert"`)
+
+  * `numbers.band_margin_lo` (string) – canonical lower bound
+  * other diagnostic margins / params
+  * `meta.tool = "band_cert"`, `meta.dps`, `meta.sha256`
+
+**Dependencies:**
+
+* Reads: bands JSON from `bands_make.py`
+* Writes: `band_cert.json` consumed by `uniform_rollup_cert.py`, `stp_test.py`, and rollup tools.
+
+---
+
+## `bochner_psd_cert.py`
+
+**Role:** PSD diagnostic (numeric)
+
+**Purpose:**
+Numerically sample a Bochner kernel (built from the window) and certify **positive semidefiniteness** via discrete tests.
+
+**CLI:**
+
+* `--window-config` (str, required) – `window.json`
+* sample parameters (grid size, truncation)
+* `--out` (str, required) – PSD JSON
+* `--dps` (int, optional)
+
+**Output:**
+
+* `bochner_psd_cert.json` (`kind = "bochner_psd_cert"`)
+
+  * PSD flags, min eigenvalue / margin
+  * parameters and meta
+
+**Dependencies:**
+
+* Reads: `window.json`
+* Writes: numeric PSD cert; can be referenced by higher-level diagnostics or master report.
+
+---
+
+## `weil_kernel.py`
+
+**Role:** analytic PSD certificate (Weil kernel)
+
+**Purpose:**
+Read a canonical window config and emit a **Weil kernel PSD certificate** using analytical / Bochner-style arguments.
+
+**CLI:**
+
+* `--window-config` (str, required) – `window.json`
+* `--out` (str, required) – `weil_psd_bochner.json`
+* `--dps` (int, optional, default 200)
+* `--method` (str, optional, default `"bochner"`)
+
+**Output:**
+
+* `weil_psd_bochner.json` (`kind = "weil_psd_bochner"`)
+
+  * `numbers.sigma`, `numbers.k0`
+  * `params.method`, `params.mode`, `params.window_config_path`
+  * `PASS` (bool), `PSD_verified` (bool)
+  * `meta.tool = "weil_kernel"`, `meta.dps`, `meta.note`, `meta.sha256`
+
+**Dependencies:**
+
+* Reads: `window.json`
+* Writes: `weil_psd_bochner.json` consumed by `uniform_rollup_cert.py`, `stp_test.py`, and top-level reporting.
+
+---
+
+## `op_grid_error_bound.py`
+
+**Role:** grid / quadrature error bound
+
+**Purpose:**
+Compute an upper bound on numerical **grid / quadrature error** for the operator discretization used in the band / explicit-formula computations.
+
+**CLI:**
+
+* `--window-config` or band/mesh args (as per normalized code)
+* grid parameters (step, max T, etc.)
+* `--out` (str, required) – `grid_error_bound.json`
+* `--dps` (int, optional)
+
+**Output:**
+
+* `grid_error_bound.json` (`kind = "grid_error_bound"`)
+
+  * `grid_error_bound.bound_hi` (string) – error cap
+  * meta fields
+
+**Dependencies:**
+
+* Reads: window / band / operator parameters
+* Writes: `grid_error_bound.json` used by `uniform_rollup_cert.py`, `rollup_uniform.py`.
+
+---
+
+## `op_prime_tail_bound.py`
+
+**Role:** operator prime tail bound
+
+**Purpose:**
+Bound the **operator tail error** coming from primes beyond a finite cutoff, in the operator / convolution representation.
+
+**CLI:**
+
+* prime bound parameters (cutoff, decay)
+* `--out` (str, required)
+* `--dps` (int, optional)
+
+**Output:**
+
+* `op_prime_tail_bound.json` (`kind = "op_prime_tail_bound"`)
+
+  * tail bound constants
+  * meta
+
+**Dependencies:**
+
+* Reads: prime / operator parameters
+* Writes: optionally referenced by continuum rollup / diagnostics.
+
+---
+
+## `prime_block_norm.py`
+
+**Role:** prime block operator norm certificate
+
+**Purpose:**
+Compute and certify an upper bound on the **finite prime block operator norm** at the chosen T0.
+
+**CLI:**
+
+* `--zeros-txt` (str, required) – path to zeros file
+* `--sigma` (str or float, required)
+* `--k0` (str or float, required)
+* `--out` (str, required) – `prime_block_norm.json`
+* `--dps` (int, optional, e.g. 900)
+
+**Output:**
+
+* `prime_block_norm.json` (`kind = "prime_block_norm"`)
+
+  * canonical: `prime_block_norm.used_operator_norm` (string)
+  * other caps (e.g. `cap_total_hi`) as needed
+  * `meta.tool = "prime_block_norm"`, `meta.dps`, `meta.sha256`
+
+**Dependencies:**
+
+* Reads: zeros / window / prime data as configured
+* Writes: `prime_block_norm.json` used by `uniform_rollup_cert.py`, `rolling_T_uniform_cert_v3.py`, `stp_test.py`.
+
+---
+
+## `prime_tail_envelope.py`
+
+**Role:** prime tail envelope at T0
+
+**Purpose:**
+Build a **symbolic/analytic envelope** for the contribution of primes beyond a cutoff at fixed `T0`.
+
+**CLI:**
+
+* prime cutoff parameters
+* `--T0` / range
+* `--out` (str, required) – `prime_tail_envelope.json`
+* `--dps` (int, optional)
+
+**Output:**
+
+* `prime_tail_envelope.json` (`kind = "prime_tail_envelope"`)
+
+  * canonical: `prime_tail.env_T0_hi` (string)
+  * supporting parameters and meta
+
+**Dependencies:**
+
+* Reads: prime tables / cutoffs
+* Writes: `prime_tail_envelope.json` used by `uniform_rollup_cert.py`, `rolling_T_uniform_cert_v3.py`.
+
+---
+
+## `tail_envelope.py` (gamma tails)
+
+**Role:** gamma / archimedean tail envelope
+
+**Purpose:**
+Bound the **gamma function tail term(s)** at a fixed T0 (or small range) using an analytic envelope.
+
+**CLI:**
+
+* `--T0` / T-range
+* parameters controlling envelope
+* `--out` (str, required) – `gamma_tail.json`
+* `--dps` (int, optional)
+
+**Output:**
+
+* `gamma_tail.json` (`kind = "gamma_tail"`)
+
+  * `gamma_tails.gamma_env_at_T0` (or similar canonical field) – gamma tail envelope at T0
+  * meta fields
+
+**Dependencies:**
+
+* Reads: only parameters
+* Writes: `gamma_tail.json` consumed by `uniform_rollup_cert.py`, `rollup_uniform.py`, rolling uniform tools.
+
+---
+
+## `analytic_tail_fit.py`
+
+**Role:** analytic tail model fitter
+
+**Purpose:**
+Fit an analytic **tail model** (e.g., for primes or gamma) to numerical samples, producing coefficients / bounds used by envelope scripts.
+
+**CLI:**
+
+* source data path (samples CSV/JSON)
+* model configuration
+* `--out` (str, required) – `analytic_tail_fit.json`
+* `--dps` (int, optional)
+
+**Output:**
+
+* `analytic_tail_fit.json` (`kind = "analytic_tail_fit"`)
+
+  * fitted coefficients / error bounds
+  * meta
+
+**Dependencies:**
+
+* Reads: sample data
+* Writes: tail model used by `prime_tail_envelope.py`, `tail_envelope.py`, or diagnostic tooling.
+
+---
+
+## `analytic_bounds.py`
+
+**Role:** high-level analytic inequality recap
+
+**Purpose:**
+Compute / restate global **analytic bounds** (not just tail fits) that appear in the RH inequality, packaging them into a JSON artifact.
+
+**CLI:**
+
+* theory parameters (sigma, k0, epsilon, etc.)
+* `--out` (str, required) – `analytic_bounds.json`
+* `--dps` (int, optional)
+
+**Output:**
+
+* `analytic_bounds.json` (`kind = "analytic_bounds"`)
+
+  * core constants, inequality margins
+  * meta
+
+**Dependencies:**
+
+* Reads: theory inputs (no cert JSONs)
+* Writes: used by reporting or by `rv_mangoldt_bounds.py` / explicit-formula diagnostics.
+
+---
+
+## `rv_mangoldt_bounds.py`
+
+**Role:** Riemann–von Mangoldt / Mangoldt bound module
+
+**Purpose:**
+Compute **bounds and certificates related to the Riemann–von Mangoldt formula / Mangoldt sums** at the chosen parameters.
+
+**CLI:**
+
+* `--zeros-txt` (str, required) – zeros data
+* `--sigma` (float/str, required)
+* `--k0` (float/str, required)
+* `--out` (str, required) – `rv_mangoldt_bounds.json`
+* `--dps` (int, optional, e.g. 900)
+
+**Output:**
+
+* `rv_mangoldt_bounds.json` (`kind = "rv_mangoldt_bounds"`)
+
+  * Mangoldt bounds and derived constants
+  * meta and optional `theory-out` companion JSON
+
+**Dependencies:**
+
+* Reads: zeros, theory data
+* Writes: bound JSON that plugs into theory / report pipeline.
+
+---
+
+## `continuum_operator_rollup.py`
+
+**Role:** global operator rollup
+
+**Purpose:**
+Roll up **continuum / operator-level information** (band, tails, prime, grid error, PSD) into a single inequality artifact, usually feeding into “infinite analysis” stage.
+
+**CLI:**
+
+* input JSON paths / certs-dir
+* `--out` (str, required) – continuum-rollup JSON
+* `--dps` (int, optional)
+
+**Output:**
+
+* `continuum_operator_cert.json` (`kind = "continuum_operator_cert"`)
+
+  * terms of the continuum inequality
+  * PASS flag(s) and meta
+
+**Dependencies:**
+
+* Reads: band / prime / tail / PSD / grid error JSONs
+* Writes: continuum cert JSON consumed by `rollup_uniform.py` / master report.
+
+---
+
+## `rollup_uniform.py`
+
+**Role:** infinite-stage uniform rollup
+
+**Purpose:**
+Combine **finite and infinite analysis** outputs across T-regions into a **global uniform statement**, usually at the end of `10_infinite_analysis.ps1`.
+
+**CLI:**
+
+* cert paths / `--certs-dir`
+* `--out` (str, required)
+* `--dps` (int, optional)
+
+**Output:**
+
+* `rollup_uniform.json` (`kind = "rollup_uniform"`)
+
+  * global PASS flag
+  * references to uniform / continuum certificates
+  * meta
+
+**Dependencies:**
+
+* Reads: uniform certificates at various T0, continuum operator certificates, analytic bounds, etc.
+* Writes: final rollup used by top-level report.
+
+---
+
+## `uniform_rollup_cert.py`
+
+**Role:** single-T0 uniform certificate
+
+**Purpose:**
+At fixed `T0`, combine **band margin, gamma tail, prime block, prime tail, grid error, PSD** into a single **PASS/FAIL** inequality check.
+
+**CLI:**
+
+* `--T0` (str/number, required)
+* `--certs-dir` (str, optional, default `PROOF_PACKET`)
+* `--out` (str, required) – `uniform_certificate.json`
+* `--dps` (int, optional, default 220)
+
+**Output:**
+
+* `uniform_certificate.json` (`kind = "uniform_certificate"`)
+
+  * `inputs.*` – paths to all component JSONs
+  * `uniform_certificate.band_margin`
+  * `uniform_certificate.gamma_env_at_T0`
+  * `uniform_certificate.epsilon_eff = band_margin - gamma_env_at_T0`
+  * `uniform_certificate.prime_block_cap`
+  * `uniform_certificate.prime_tail_norm`
+  * `uniform_certificate.grid_error_norm`
+  * `uniform_certificate.lhs_total = prime_block_cap + prime_tail_norm + grid_error_norm`
+  * `uniform_certificate.PSD_verified`
+  * root `PASS` (bool)
+  * `meta.*`
+
+**Dependencies:**
+
+* Reads: `band_cert.json`, `prime_block_norm.json`, `prime_tail_envelope.json`, `gamma_tail.json`, optional `grid_error_bound.json`, `continuum_operator_cert.json`, `weil_explicit_cert.json`, `weil_psd_bochner.json`
+* Writes: `uniform_certificate.json` used by `rollup_uniform.py`, `stp_test.py`, reports.
+
+---
+
+## `rolling_T_uniform_cert_v3.py`
+
+**Role:** multi-T uniform sweep
+
+**Purpose:**
+Sweep `T` across a grid and run the **uniform certificate** logic at each T-point, emitting a path / envelope of PASS/FAIL / margins.
+
+**CLI:**
+
+* T-range and step parameters
+* `--certs-dir` (str)
+* `--out` (str, required) – multi-T JSON/CSV
+* `--dps` (int, optional)
+
+**Output:**
+
+* `rolling_uniform_cert.json` (or similar `kind = "rolling_T_uniform"`)
+
+  * array over T of band margin, tail norm, lhs_total, PASS
+  * meta and grid info
+
+**Dependencies:**
+
+* Reads: same cert JSONs as `uniform_rollup_cert.py` for each T
+* Writes: rolling cert JSON used by diagnostics / visualization.
+
+---
+
+## `subspace_psd_cholesky.py`
+
+**Role:** PSD diagnostic (subspace)
+
+**Purpose:**
+Build a **Gram matrix** for a chosen family of atoms and certify PSD via standard and pivoted Cholesky.
+
+**CLI:**
+
+* `--basis` (str, optional, default `"gaussian"`)
+* `--atoms` (int, required)
+* `--sigma-min`, `--sigma-max` (str, required)
+* `--k0-min`, `--k0-max` (str, required)
+* `--gridA` (str, optional, default `"50"`)
+* `--mgrid` (int, optional, default 2049)
+* `--eta` (str, optional, default `"0"`)
+* `--threads` (int, optional, default 1)
+* `--progress` (flag)
+* `--out` (str, required) – JSON
+* `--csv` (str, required) – Gram matrix CSV
+* `--dps` (int, optional, default 120)
+
+**Output:**
+
+* `subspace_psd_cholesky.json` (`kind = "subspace_psd_cholesky"`)
+
+  * `inputs.*` – basis, atoms, sigma/k0 ranges, grid, etc.
+  * `result.chol_success`, `result.min_diag_L`
+  * `result.pivot_success`, pivot diagnostics
+  * meta
+
+**Dependencies:**
+
+* Reads: none (besides CLI)
+* Writes: JSON + CSV used for PSD analysis and debugging.
+
+---
+
+## `explicit_formula.py`
+
+**Role:** explicit-formula engine
+
+**Purpose:**
+Implement the **explicit formula** linking primes, zeros, and test function, producing contributions for band / prime side and error terms.
+
+**CLI:**
+
+* window / test function parameters
+* zeros / primes inputs
+* `--out` (str, required) – explicit formula JSON
+* `--dps` (int, optional)
+
+**Output:**
+
+* `explicit_formula.json` (`kind = "explicit_formula"`)
+
+  * prime side, zero side, tail terms, remainder
+  * meta
+
+**Dependencies:**
+
+* Reads: zeros, primes, window/test config
+* Writes: explicit-formula JSON consumed by continuum / rollup modules.
+
+---
+
+## `fourier_inversion_cert.py`
+
+**Role:** Fourier inversion certificate
+
+**Purpose:**
+Numerically and analytically verify **Fourier inversion bounds** for the chosen window / kernel, producing a cert for the inversion step.
+
+**CLI:**
+
+* `--window` / `--window-config` or parameters (`--sigma`, `--notch-k0`)
+* `--xmax`, `--simpson-n` (integration controls)
+* `--out` (str, required) – `fourier_inversion_cert.json`
+* `--dps` (int, optional)
+* `--tqdm` / `--probe` flags (optional)
+
+**Output:**
+
+* `fourier_inversion_cert.json` (`kind = "fourier_inversion_cert"`)
+
+  * numerical and analytic error bounds
+  * meta
+
+**Dependencies:**
+
+* Reads: window config / parameters
+* Writes: inversion cert used by `deconv_prover.py` and infinite-stage analysis.
+
+---
+
+## `deconv_prover.py`
+
+**Role:** deconvolution prover
+
+**Purpose:**
+Use the **Fourier inversion certificate** plus other ingredients to certify the deconvolution step used in the RH inequality pipeline.
+
+**CLI:**
+
+* `--report` (str, required) – global report JSON (input summary)
+* `--fourier` (str, required) – `fourier_inversion_cert.json`
+* `--out` (str, required) – `deconv_cert_infinite.json`
+* `--verbose` (flag, optional)
+
+**Output:**
+
+* `deconv_cert_infinite.json` (`kind = "deconv_cert_infinite"`)
+
+  * deconvolution bounds / PASS
+  * meta
+
+**Dependencies:**
+
+* Reads: `report_wrap.json`, `fourier_inversion_cert.json`
+* Writes: deconv cert consumed by `continuum_operator_rollup.py` / infinite analysis.
+
+---
+
+## `density_prover.py`
+
+**Role:** density inequality prover
+
+**Purpose:**
+Prove / certify a **density-type inequality** (e.g., S(T) bounds / zero density) that is used inside the main RH inequality.
+
+**CLI:**
+
+* input data (zeros / kernel)
+* `--out` (str, required)
+* `--dps` (int, optional)
+
+**Output:**
+
+* `density_prover.json` (`kind = "density_prover"`)
+
+  * density bounds
+  * meta
+
+**Dependencies:**
+
+* Reads: relevant numeric data
+* Writes: density JSON used by infinite / uniform rollup as a component bound.
+
+---
+
+## `core_interval_prover.py`
+
+**Role:** core interval prover (finite T range)
+
+**Purpose:**
+Prove the **core finite interval** for T (e.g., up to T0) using a mixture of band, tails, and explicit-formula bounds.
+
+**CLI:**
+
+* interval parameters (T range)
+* paths to needed cert JSONs
+* `--out` (str, required)
+* `--dps` (int, optional)
+
+**Output:**
+
+* `core_interval_prover.json` (`kind = "core_interval_prover"`)
+
+  * PASS/FAIL for core finite interval
+  * meta
+
+**Dependencies:**
+
+* Reads: band / prime / tail / grid / explicit-formula JSONs
+* Writes: finite interval cert used by rollup.
+
+---
+
+## `frame_probe.py`
+
+**Role:** diagnostic / probing tool
+
+**Purpose:**
+Probe the operator / window **frame properties** on a grid for debugging and visualization, not directly part of the proof chain.
+
+**CLI:**
+
+* window / operator parameters
+* `--out` (str, required) – JSON
+* additional CSV/plot outputs as configured
+
+**Output:**
+
+* `frame_probe.json` (`kind = "frame_probe"`)
+
+  * sampled frame / operator metrics
+  * meta
+
+**Dependencies:**
+
+* Reads: window / config
+* Writes: diagnostics only (not required by rollups).
+
+---
+
+## `lipschitz_q_bound.py`
+
+**Role:** Lipschitz / q-bound module
+
+**Purpose:**
+Compute **Lipschitz-type bounds** or q-dependent estimates used to control variations in the explicit-formula / operator.
+
+**CLI:**
+
+* parameters controlling Lipschitz ratio / region
+* `--out` (str, required)
+* `--dps` (int, optional)
+
+**Output:**
+
+* `lipschitz_q_bound.json` (`kind = "lipschitz_q_bound"`)
+
+  * Lipschitz constants / q-bounds
+  * meta
+
+**Dependencies:**
+
+* Reads: theory / numeric parameters
+* Writes: optional support JSON for other bounds.
+
+---
+
+## `param_cone_uniform_cert_v4c.py`
+
+**Role:** parametric cone uniform certificate
+
+**Purpose:**
+Over a **parameter cone** in `(sigma, k0, ...)`, certify a **uniform inequality** (cone-shaped region) and emit a parametric certificate.
+
+**CLI:**
+
+* cone parameters (ranges in sigma, k0, etc.)
+* grid / resolution settings
+* `--out` (str, required) – `param_cone_uniform_cert.json`
+* `--dps` (int, optional)
+
+**Output:**
+
+* `param_cone_uniform_cert.json` (`kind = "param_cone_uniform_cert"`, v4c schema)
+
+  * region description, bounds, PASS flags
+  * meta
+
+**Dependencies:**
+
+* Reads: analytic / numeric modules as needed (tails, bands, etc.)
+* Writes: cone cert used by master reporting or future parameter sweeps.
+
+---
+
+## `param_cover_cert.py`
+
+**Role:** parametric cover certificate
+
+**Purpose:**
+Given several **parametric regions**, certify that they **cover** the total parameter space required (e.g., union of cones).
+
+**CLI:**
+
+* list of param cert JSONs
+* `--out` (str, required)
+* `--dps` (int, optional)
+
+**Output:**
+
+* `param_cover_cert.json` (`kind = "param_cover_cert"`)
+
+  * description of coverage and overlaps
+  * meta
+
+**Dependencies:**
+
+* Reads: param cone/uniform cert JSONs
+* Writes: cover cert for final report.
+
+---
+
+## `param_search.py`
+
+**Role:** parameter search / tuner
+
+**Purpose:**
+Scan `(sigma, k0, ...)` space searching for **good candidate parameters** satisfying local inequalities or optimizing margin.
+
+**CLI:**
+
+* ranges for sigma, k0, etc.
+* search settings (step sizes, heuristics)
+* `--out` (str, required) – `param_search.json`
+* `--dps` (int, optional)
+
+**Output:**
+
+* `param_search.json` (`kind = "param_search"`)
+
+  * candidate list, metrics
+  * meta
+
+**Dependencies:**
+
+* Reads: analytic modules / local inequality tests
+* Writes: search results feed into manual / scripted selection of final parameters.
+
+---
+
+## `stp_test.py`
+
+**Role:** STP / toolkit self-test
+
+**Purpose:**
+Run a **sanity test pass** across the main modules: check CLI wiring, JSON schemas, and basic inequalities using small configs.
+
+**CLI:**
+
+* `--certs-dir` / paths to sample JSONs
+* `--out` (str, required) – `stp_test.json` (or similar)
+* `--dps` (int, optional)
+* flags to enable/disable subsets of tests
+
+**Output:**
+
+* `stp_test.json` (`kind = "stp_test"`)
+
+  * per-module PASS/FAIL, notes
+  * meta
+
+**Dependencies:**
+
+* Reads: most canonical JSONs (window, bands, band_cert, weil_psd, prime_block_norm, prime_tail_envelope, gamma_tail, uniform_certificate, etc.)
+* Writes: diagnostic STP record only.
+
+---

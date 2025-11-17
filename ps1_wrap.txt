@@ -1,0 +1,1117 @@
+[01_inputs.ps1] – Inputs Stage Orchestrator
+
+Purpose
+  - Run the initial “inputs” stage of the RH toolkit.
+  - Generates the core configuration artifacts:
+      • window.json      – Gaussian window config
+      • bands_auto.json  – automatically generated band decomposition
+      • band_cert.json   – certification of the bands
+
+Parameters
+  - Root        : Base project directory (default: current directory).
+  - ToolsDir    : Path to tools/ (default: Root\tools).
+  - InputsDir   : Path to packs\rh\inputs (default, but not currently used in commands).
+  - CertsDir    : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - Dps         : Decimal precision for mpmath-based tools (default: 220).
+  - Grid        : Grid size for band construction (default: 6000).
+  - CritLeft    : Left edge of critical interval (default: 0.30).
+  - CritRight   : Right edge of critical interval (default: 2.80).
+  - Sigma       : Gaussian width parameter for the window (default: 6.0).
+  - K0          : Gaussian notch location parameter (default: 0.025).
+  - UseVenv     : If true, prefer VenvDir\Scripts\python.exe.
+  - VenvDir     : Virtual environment root (default: Root\rh-env).
+
+Python Resolver
+  - If UseVenv is set:
+      • Looks for VenvDir\Scripts\python.exe.
+      • If found, uses it as the Python interpreter.
+      • If not found, logs a warning and falls back to python on PATH.
+
+Main Workflow
+  1) window_gen.py → window.json
+     - Tool:  tools/window_gen.py
+     - Command:
+         python window_gen.py
+           --mode gauss
+           --sigma <Sigma>
+           --k0 <K0>
+           --out <CertsDir>\window.json
+           --dps <Dps>
+     - Output:
+         • <CertsDir>\window.json
+     - Assert:
+         • Fails if window.json does not exist.
+
+  2) bands_make.py → bands_auto.json
+     - Tool:  tools/bands_make.py
+     - Command:
+         python bands_make.py
+           --window-config <CertsDir>\window.json
+           --critical-left <CritLeft>
+           --critical-right <CritRight>
+           --grid <Grid>
+           --out <CertsDir>\bands_auto.json
+           --dps <Dps>
+     - Output:
+         • <CertsDir>\bands_auto.json
+     - Assert:
+         • Fails if bands_auto.json does not exist.
+
+  3) band_cert.py → band_cert.json
+     - Tool:  tools/band_cert.py
+     - Command:
+         python band_cert.py
+           --window-config <CertsDir>\window.json
+           --bands <CertsDir>\bands_auto.json
+           --out <CertsDir>\band_cert.json
+           --dps <Dps>
+           --tqdm
+     - Output:
+         • <CertsDir>\band_cert.json
+     - Assert:
+         • Fails if band_cert.json does not exist.
+
+Logging / Messages
+  - Uses Msg() with prefix “[01_inputs]” for all status messages.
+  - On success, prints “Inputs stage complete.”
+
+Dependencies
+  - Python scripts expected in ToolsDir:
+      • window_gen.py
+      • bands_make.py
+      • band_cert.py
+  - Output directory:
+      • CertsDir (PROOF_PACKET) must be writable.
+
+[02_tails.ps1] – Tails Stage Orchestrator
+
+Purpose
+  - Run the “tails” stage of the RH toolkit.
+  - Produces the prime-tail envelope certificate:
+      • prime_tail_envelope.json
+
+Parameters
+  - Root      : Base project directory (default: current directory).
+  - ToolsDir  : Path to tools/ (default: Root\tools, via standard resolver).
+  - InputsDir : Path to packs\rh\inputs or similar (defined but not used in visible commands).
+  - CertsDir  : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - Dps       : Decimal precision for mpmath-based tools (default: 220).
+  - Sigma     : Gaussian width parameter for the tail kernel (default: 6.0).
+  - K0        : Gaussian notch location parameter (default: 0.25).
+  - T0        : Starting height T0 for the tail region (default: "1000000").
+  - UseVenv   : If true, prefer VenvDir\Scripts\python.exe.
+  - VenvDir   : Virtual environment root (default: Root\rh-env).
+
+Messaging / Helpers
+  - Msg(m)  : Writes status messages with “[02_tails]” prefix (Cyan).
+  - Die(m)  : Throws on fatal errors.
+  - Warn(m) : Writes warnings with “[02_tails] WARNING” prefix (Yellow).
+  - Assert-File(path, msg) : (Defined in the omitted middle block) – aborts if a required file is missing.
+
+Python Resolver
+  - Uses a $Py variable (set in the omitted middle block) to:
+      • Prefer VenvDir\Scripts\python.exe when UseVenv is true and that file exists.
+      • Otherwise fall back to “python” on PATH.
+  - Emits a warning if the venv python is requested but not found.
+
+Main Workflow
+  1) prime_tail_envelope.py → prime_tail_envelope.json
+     - Tool:
+         • tools/prime_tail_envelope.py
+     - Command (conceptual):
+         python prime_tail_envelope.py
+           --sigma <Sigma>
+           --k0 <K0>
+           --T0 <T0>
+           --out <CertsDir>\prime_tail_envelope.json
+           --dps <Dps>
+           --tqdm
+     - Output:
+         • <CertsDir>\prime_tail_envelope.json
+     - Assert:
+         • Uses Assert-File to ensure prime_tail_envelope.json exists after the run.
+           Fails with a descriptive message if missing.
+
+Logging / Completion
+  - Logs the exact python command line before running prime_tail_envelope.py.
+  - On success, prints:
+      “Tails stage complete.”
+
+Dependencies
+  - Python script:
+      • prime_tail_envelope.py in ToolsDir.
+  - Output directory:
+      • CertsDir (PROOF_PACKET) must be writable.
+
+[03_prime_block_and_grid.ps1] – Prime Block + Grid Error Stage Orchestrator
+
+Purpose
+  - Run the combined “prime block” and “grid error” stage of the RH toolkit.
+  - Produces:
+      • prime_block_norm.json   – prime block norm / main prime contribution certificate.
+      • grid_error_bound.json   – grid discretization error bound.
+
+Parameters
+  - Root      : Base project directory (default: current directory).
+  - ToolsDir  : Path to tools/ (default: Root\tools).
+  - InputsDir : Reserved input path (not used in visible snippet).
+  - CertsDir  : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - Dps       : Decimal precision for mpmath-based tools (default: 950).
+  - Sigma     : Gaussian width parameter (default: 6.0).
+  - K0        : Gaussian notch/location parameter (default: 0.25).
+  - Grid      : Grid size used for prime/grid analysis (default: 8000).
+  - UseVenv   : If true, prefer VenvDir\Scripts\python.exe.
+  - VenvDir   : Virtual environment root (default: Root\rh-env).
+
+Messaging / Helpers
+  - Msg(m)  : Status messages with “[03_prime_block_and_grid]” prefix (Cyan).
+  - Die(m)  : Throws on fatal errors.
+  - Warn(m) : Warnings with “[03_prime_block_and_grid] WARNING:” prefix (Yellow).
+
+Python Resolver
+  - Uses a $Py interpreter variable (set in the omitted “...” block):
+      • If UseVenv is set and VenvDir\Scripts\python.exe exists, that is used.
+      • Otherwise falls back to “python” on PATH.
+      • Emits a warning if venv python is requested but not found.
+
+Main Workflow
+  1) prime_block_norm.py → prime_block_norm.json   (implicit in the “...” region)
+     - Tool (expected): tools/prime_block_norm.py
+     - Behavior (conceptual):
+         • Computes the prime-block norm / main prime sum contribution using (Sigma, K0, Grid, Dps and an appropriate zeros source).
+         • Writes:
+             <CertsDir>\prime_block_norm.json
+         • Script is expected to assert existence of prime_block_norm.json after completion.
+
+  2) op_grid_error_bound.py → grid_error_bound.json
+     - Tool:
+         • tools/op_grid_error_bound.py
+     - Command:
+         python op_grid_error_bound.py
+           --grid <Grid>
+           --out <CertsDir>\grid_error_bound.json
+           --dps <Dps>
+     - Implementation:
+         • $GridErr = Join-Path $CertsDir "grid_error_bound.json"
+         • $geb     = Join-Path $ToolsDir "op_grid_error_bound.py"
+         • If op_grid_error_bound.py exists:
+               - Logs the full python command via Msg.
+               - Invokes:
+                   & $Py $geb `
+                     --grid "$Grid" `
+                     --out $GridErr `
+                     --dps "$Dps"
+           Else:
+               - Issues Warn: “op_grid_error_bound.py not found in $ToolsDir; skipping grid error bound”.
+     - Output:
+         • <CertsDir>\grid_error_bound.json
+
+Completion
+  - On finishing all steps, prints:
+      “Prime block and grid stage complete.”
+
+Dependencies
+  - Python scripts in ToolsDir:
+      • prime_block_norm.py
+      • op_grid_error_bound.py
+  - Output directory:
+      • CertsDir (PROOF_PACKET) must be writable.
+
+[04_weil_psd.ps1] – Weil / Bochner Positive-Definiteness Stage
+
+Purpose
+  - Verify positive-definiteness (PSD) of the RH window/kernel.
+  - Produces a PSD certificate:
+      • weil_psd_bochner.json
+
+Parameters
+  - Root      : Base project directory (default: current directory).
+  - ToolsDir  : Path to tools/ (default: Root\tools).
+  - InputsDir : Reserved input path (not used directly here).
+  - CertsDir  : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - Dps       : Decimal precision for mpmath-based tools (default: 220).
+  - UseVenv   : If true, prefer VenvDir\Scripts\python.exe.
+  - VenvDir   : Virtual environment root (default: Root\rh-env).
+
+Messaging / Helpers
+  - Msg(m)        : Status messages with “[04_weil_psd]” prefix (Cyan).
+  - Die(m)        : Throws on fatal errors.
+  - Warn(m)       : Warnings with “[04_weil_psd] WARNING:” prefix (Yellow).
+  - Assert-File(p,m): Aborts if a required file is missing.
+
+Python Resolver
+  - Uses $Py (defined in the omitted block) to select Python:
+      • If UseVenv is true and VenvDir\Scripts\python.exe exists, use that.
+      • Otherwise fall back to “python” on PATH.
+      • Warns if venv python is requested but missing.
+
+Main Inputs
+  - WindowJson = <CertsDir>\window.json   (must already exist).
+
+Main Workflow
+  1) Attempt Weil-PSD via weil_kernel.py
+     - Tool (preferred, if present):
+         • tools/weil_kernel.py
+     - Expected command (conceptual):
+         python weil_kernel.py
+           --window-config <CertsDir>\window.json
+           --out <CertsDir>\weil_psd_bochner.json
+           --dps <Dps>
+     - If weil_kernel.py exists, script runs it.
+
+  2) Fallback to bochner_psd_cert.py if needed
+     - If weil_kernel.py is not found, script looks for:
+         • tools/bochner_psd_cert.py
+     - Command:
+         python bochner_psd_cert.py
+           --window-config <CertsDir>\window.json
+           --out <CertsDir>\weil_psd_bochner.json
+           --dps <Dps>
+     - If neither tool exists, Die:
+         “No PSD tool found (neither weil_kernel.py nor bochner_psd_cert.py exists in $ToolsDir)”.
+
+  3) Final Assertion
+     - Bochner = <CertsDir>\weil_psd_bochner.json
+     - Assert-File $Bochner:
+         • Fails with message: “Weil PSD must produce weil_psd_bochner.json” if missing.
+
+Completion
+  - On success, prints:
+      “Weil PSD stage complete.”
+
+Dependencies
+  - Requires existing:
+      • <CertsDir>\window.json  (from 01_inputs stage).
+  - Python tools in ToolsDir:
+      • weil_kernel.py (preferred), and/or
+      • bochner_psd_cert.py (fallback).
+  - Output directory:
+      • CertsDir (PROOF_PACKET) must be writable.
+
+[05_continuum_rollup.ps1] – Continuum / Operator Rollup Stage
+
+Purpose
+  - Run the “continuum / operator rollup” stage of the RH toolkit.
+  - Combines all major certified contributions (bands, primes, tails, grid error)
+    into a single continuum operator certificate:
+      • continuum_operator_cert.json
+
+Parameters
+  - Root      : Base project directory (default: current directory).
+  - ToolsDir  : Path to tools/ (default: Root\tools).
+  - CertsDir  : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - Dps       : Decimal precision for mpmath-based tools (default: 950).
+  - UseVenv   : If true, prefer VenvDir\Scripts\python.exe.
+  - VenvDir   : Virtual environment root (default: Root\rh-env).
+
+Messaging / Helpers
+  - Msg(m)        : Status messages with “[05_continuum_rollup]” prefix (Cyan).
+  - Die(m)        : Throws on fatal errors.
+  - Warn(m)       : Warnings with “[05_continuum_rollup] WARNING:” prefix (Yellow).
+  - Assert-File(p,m): Aborts if a required file is missing.
+  - $ErrorActionPreference = "Stop" to fail on any error.
+
+Python Resolver
+  - $Py defaults to "python".
+  - If UseVenv is true:
+      • Builds VenvDir\Scripts\python.exe as candidate.
+      • If that exists, uses it as $Py.
+      • Otherwise warns and falls back to python on PATH.
+
+Core Inputs (must already exist)
+  - band_cert.json           : $BandCert   = CertsDir\band_cert.json
+  - gamma_tail.json          : $GammaTail  = CertsDir\gamma_tail.json
+  - prime_tail_envelope.json : $PrimeTail  = CertsDir\prime_tail_envelope.json
+  - prime_block_norm.json    : $PrimeBlock = CertsDir\prime_block_norm.json
+  - grid_error_bound.json    : $GridErr    = CertsDir\grid_error_bound.json (optional)
+
+  - Assertions:
+      • Assert-File $BandCert   "band_cert.json not found (run 01_inputs.ps1)"
+      • Assert-File $GammaTail  "gamma_tail.json not found (run 02_tails.ps1)"
+      • Assert-File $PrimeTail  "prime_tail_envelope.json not found (run 02_tails.ps1)"
+      • Assert-File $PrimeBlock "prime_block_norm.json not found (run 03_prime_block_and_grid.ps1)"
+      • If $GridErr is missing: Warn that continuum rollup will proceed without a grid error term.
+
+Main Output
+  - Continuum operator certificate:
+      • $ContinuumJson = CertsDir\continuum_operator_cert.json
+
+Main Workflow
+  1) Locate continuum_operator_rollup.py
+     - $cor = Join-Path $ToolsDir "continuum_operator_rollup.py"
+     - Assert-File $cor "continuum_operator_rollup.py not found in $ToolsDir"
+
+  2) Build argument list (per normalization spec)
+     - Base args (no grid error):
+         --band-cert   <CertsDir\band_cert.json>
+         --prime-block <CertsDir\prime_block_norm.json>
+         --prime-tail  <CertsDir\prime_tail_envelope.json>
+         --gamma-tails <CertsDir\gamma_tail.json>
+         --dps         <Dps>
+         --out         <CertsDir\continuum_operator_cert.json>
+
+     - If grid_error_bound.json exists:
+         - Args become:
+             --band-cert   <BandCert>
+             --prime-block <PrimeBlock>
+             --prime-tail  <PrimeTail>
+             --gamma-tails <GammaTail>
+             --grid-error  <GridErr>
+             --dps         <Dps>
+             --out         <ContinuumJson>
+
+  3) Execute rollup
+     - Logs the full command:
+         “python continuum_operator_rollup.py …”
+     - Runs:
+         & $Py $cor @contArgs
+
+  4) Final assertion
+     - Assert-File $ContinuumJson
+         • Error message: "continuum_operator_rollup did not produce continuum_operator_cert.json"
+
+Completion
+  - On success, prints:
+      “Continuum rollup stage complete.”
+
+Dependencies / Stage Ordering
+  - Requires successful completion of:
+      • 01_inputs.ps1   → band_cert.json
+      • 02_tails.ps1    → gamma_tail.json, prime_tail_envelope.json
+      • 03_prime_block_and_grid.ps1 → prime_block_norm.json (+ optional grid_error_bound.json)
+  - Python script:
+      • continuum_operator_rollup.py in ToolsDir.
+  - Output directory:
+      • CertsDir (PROOF_PACKET) must be writable.
+
+[06_lipschitz_and_density.ps1] – Lipschitz Bound & Zero-Density Stage
+
+Purpose
+  - Run the “Lipschitz + zero-density” stage of the RH toolkit.
+  - Produces two key analytic certificates derived from the already-assembled operator:
+      • lipschitz_bound.json     – Lipschitz / continuity-type bound for the window/operator.
+      • zero_density_cert.json   – Zero-density / non-accumulation certificate for the spectrum.
+
+Parameters
+  - Root      : Base project directory (default: current directory).
+  - ToolsDir  : Path to tools/ (default: Root\tools).
+  - CertsDir  : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - Dps       : Decimal precision for mpmath-based tools (high precision, matches continuum stage).
+  - UseVenv   : If true, prefer VenvDir\Scripts\python.exe.
+  - VenvDir   : Virtual environment root (default: Root\rh-env).
+
+Messaging / Helpers
+  - Msg(m)        : Status messages with “[06_lipschitz_and_density]” prefix (Cyan).
+  - Die(m)        : Throws on fatal errors.
+  - Warn(m)       : Warnings with “[06_lipschitz_and_density] WARNING:” prefix (Yellow).
+  - Assert-File(p,m): Aborts if a required file is missing.
+  - $ErrorActionPreference = "Stop" so any error halts the stage.
+
+Python Resolver
+  - Uses a $Py interpreter variable:
+      • Default: "python".
+      • If UseVenv is true and VenvDir\Scripts\python.exe exists, that executable is used instead.
+      • If venv python is requested but missing, logs a warning and falls back to python on PATH.
+
+Core Inputs (must already exist)
+  - window.json                 : CertsDir\window.json
+  - band_cert.json              : CertsDir\band_cert.json
+  - continuum_operator_cert.json: CertsDir\continuum_operator_cert.json
+  - weil_psd_bochner.json       : CertsDir\weil_psd_bochner.json
+
+  - These are asserted at the start via Assert-File with messages pointing back to:
+      • 01_inputs.ps1         (window.json, band_cert.json)
+      • 04_weil_psd.ps1       (weil_psd_bochner.json)
+      • 05_continuum_rollup.ps1 (continuum_operator_cert.json)
+
+Main Outputs
+  - lipschitz_bound.json     : CertsDir\lipschitz_bound.json
+  - zero_density_cert.json   : CertsDir\zero_density_cert.json
+
+Main Workflow (Conceptual)
+  1) Lipschitz bound certificate
+     - Locates the Lipschitz-bound tool in ToolsDir (e.g., a lipschitz_bound.py–style script).
+     - Asserts the tool exists.
+     - Runs it with arguments including:
+         --window-config      <CertsDir\window.json>
+         --band-cert          <CertsDir\band_cert.json>
+         --continuum-operator <CertsDir\continuum_operator_cert.json>
+         --psd-cert           <CertsDir\weil_psd_bochner.json>
+         --out                <CertsDir\lipschitz_bound.json>
+         --dps                <Dps>
+     - Logs the full python command via Msg before execution.
+     - After run, Assert-File lipschitz_bound.json with a clear error message if missing.
+
+  2) Zero-density certificate
+     - Locates the zero-density tool in ToolsDir (e.g., a zero_density_cert.py–style script).
+     - Asserts the tool exists.
+     - Runs it with arguments typically referencing:
+         --band-cert          <CertsDir\band_cert.json>
+         --continuum-operator <CertsDir\continuum_operator_cert.json>
+         --lipschitz-bound    <CertsDir\lipschitz_bound.json>
+         --out                <CertsDir\zero_density_cert.json>
+         --dps                <Dps>
+     - Logs the full python command via Msg before execution.
+     - Assert-File zero_density_cert.json after run.
+
+Completion
+  - On success, prints:
+      “Lipschitz and density stage complete.”
+
+Dependencies / Stage Ordering
+  - Must run after:
+      • 01_inputs.ps1            → window.json, band_cert.json
+      • 04_weil_psd.ps1          → weil_psd_bochner.json
+      • 05_continuum_rollup.ps1  → continuum_operator_cert.json
+  - Writes results into CertsDir (PROOF_PACKET), for later stages that need global bounds.
+
+[07_tails_bundle_and_explicit.ps1] – Tails Bundle & Explicit-Formula Stage
+
+Purpose
+  - Run the “tails bundle + explicit formula” stage of the RH toolkit.
+  - Uses previously certified objects (bands, PSD, continuum, tails) to:
+      • Build several analytic tail/prime bounds:
+          – op_prime_tail_bound.json
+          – analytic_bounds.json
+          – analytic_tail_fit.json
+      • Then (if possible) assemble the full explicit-formula certificate:
+          – explicit_formula.json
+
+Parameters
+  - Root      : Base project directory (default: current directory).
+  - ToolsDir  : Path to tools/ (default: Root\tools).
+  - InputsDir : Path to packs\rh\inputs (default; not used directly here).
+  - CertsDir  : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - Dps       : Decimal precision for mpmath-based tools (default: 950).
+  - Sigma     : Gaussian width parameter (default: 6.0).
+  - K0        : Gaussian notch/location parameter (default: 0.25) – used only for context/logging.
+  - T0        : Tail-height context parameter (default: "10000000000000000" i.e. 1e16; for logs only).
+  - X0        : Prime bound evaluation point x0 (default: 40.0).
+  - Ap        : Prime-tail amplitude parameter A′ (default: 1.0).
+  - Ag        : Gamma-tail amplitude parameter Aγ (default: 1.0).
+  - UseVenv   : If true, prefer VenvDir\Scripts\python.exe.
+  - VenvDir   : Virtual environment root (default: Root\rh-env).
+
+Messaging / Helpers
+  - Msg(m)        : Status messages with “[07_tails_bundle_and_explicit]” prefix (Cyan).
+  - Die(m)        : Throws on fatal errors.
+  - Warn(m)       : Warnings with “[07_tails_bundle_and_explicit] WARNING:” prefix (Yellow).
+  - Assert-File(p,m): Aborts if a required file is missing.
+  - $ErrorActionPreference = "Stop" to fail fast on errors.
+
+Python Resolver
+  - $Py defaults to "python".
+  - If UseVenv is true:
+      • Tries VenvDir\Scripts\python.exe as $Py.
+      • If missing, logs a warning and falls back to python on PATH.
+
+Core Input Certificates (must already exist)
+  - band_cert.json              : $BandCert      = CertsDir\band_cert.json
+  - weil_psd_bochner.json       : $WeilPsd       = CertsDir\weil_psd_bochner.json
+  - continuum_operator_cert.json: $ContinuumCert = CertsDir\continuum_operator_cert.json
+  - grid_error_bound.json       : $GridErr       = CertsDir\grid_error_bound.json
+  - prime_tail_envelope.json    : $PrimeTailEnv  = CertsDir\prime_tail_envelope.json
+  - gamma_tail.json             : $GammaTail     = CertsDir\gamma_tail.json
+
+  - Assertions:
+      • band_cert.json           → “run 01_inputs.ps1”
+      • weil_psd_bochner.json    → “run 04_weil_psd.ps1”
+      • continuum_operator_cert.json → “run 05_continuum_rollup.ps1”
+      • grid_error_bound.json    → “run 03_prime_block_and_grid.ps1”
+      • prime_tail_envelope.json → “run 02_tails.ps1”
+      • gamma_tail.json          → “run 02_tails.ps1”
+
+Main Outputs
+  - op_prime_tail_bound.json : $PrimeOpTail   (CertsDir)
+  - analytic_bounds.json     : $AnalyticBounds (CertsDir)
+  - analytic_tail_fit.json   : $TailsJson     (CertsDir)
+  - explicit_formula.json    : $ExplicitJson  (CertsDir)
+
+Main Workflow
+
+  1) Operator prime tail bound → op_prime_tail_bound.json
+     - Tool:
+         • op_prime_tail_bound.py  in ToolsDir.
+     - Command:
+         python op_prime_tail_bound.py
+           --x0 X0
+           --A-prime Ap
+           --K 3
+           --out op_prime_tail_bound.json
+           --dps Dps
+     - Behavior:
+         • If op_prime_tail_bound.py is missing, logs a warning and skips this step.
+         • After running, checks for op_prime_tail_bound.json and logs created/not-created.
+
+  2) Analytic bounds → analytic_bounds.json
+     - Tool:
+         • analytic_bounds.py in ToolsDir.
+     - Command:
+         python analytic_bounds.py
+           --sigma Sigma
+           --A-prime Ap
+           --K 3
+           --out analytic_bounds.json
+           --dps Dps
+     - Behavior:
+         • If analytic_bounds.py is missing, logs a warning and skips this step.
+         • After running, checks for analytic_bounds.json and logs created/not-created.
+
+  3) Analytic tail fit bundle (tails JSON) → analytic_tail_fit.json
+     - Tool:
+         • analytic_tail_fit.py in ToolsDir.
+     - Command:
+         python analytic_tail_fit.py
+           --packet-dir CertsDir
+           --Ap Ap
+           --Ag Ag
+           --out analytic_tail_fit.json
+           --dps Dps
+     - Behavior:
+         • If analytic_tail_fit.py is missing, logs a warning and skips this step.
+         • After running, checks for analytic_tail_fit.json and logs:
+             – created, or
+             – not created, and warns that explicit_formula tails input will be missing.
+
+  4) Explicit formula rollup → explicit_formula.json
+     - Tool:
+         • explicit_formula.py in ToolsDir.
+     - Guards:
+         • If explicit_formula.py is missing → warn and skip.
+         • If analytic_tail_fit.json ($TailsJson) is missing → warn and skip.
+     - Command (when both tool and tails JSON exist):
+         python explicit_formula.py
+           --band-cert BandCert
+           --weil-psd WeilPsd
+           --tails analytic_tail_fit.json
+           --continuum-cert continuum_operator_cert.json
+           --dps Dps
+           --out explicit_formula.json
+     - Behavior:
+         • After running, checks for explicit_formula.json and logs created/not-created.
+
+Completion
+  - On completion of all above steps (run or skipped as allowed), logs:
+      “Tails bundle and explicit-formula stage complete.”
+
+Dependencies / Stage Ordering
+  - Requires prior stages to have produced:
+      • 01_inputs.ps1                 → band_cert.json
+      • 02_tails.ps1                  → prime_tail_envelope.json, gamma_tail.json
+      • 03_prime_block_and_grid.ps1   → grid_error_bound.json
+      • 04_weil_psd.ps1               → weil_psd_bochner.json
+      • 05_continuum_rollup.ps1       → continuum_operator_cert.json
+  - Writes all new JSON artifacts into CertsDir (PROOF_PACKET) for use in final global checks.
+
+[08_core_integral.ps1] – Core Integral / Finite-Interval & Uniform Certificate Stage
+
+Purpose
+  - Run the “core integral” stage of the RH toolkit.
+  - Produces two high-level global certificates:
+      • uniform_certificate.json      – uniform-in-T certificate (global uniform rollup).
+      • core_interval_prover.json     – finite-interval core integral proof at base T0.
+
+Parameters
+  - Root      : Base project directory (default: current directory).
+  - ToolsDir  : Path to tools/ (default: Root\tools).
+  - InputsDir : Reserved input path (default: Root\; not used directly in this script).
+  - CertsDir  : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - Dps       : Decimal precision for mpmath-based tools (default: 950).
+  - T0        : Base height T0 for certificates (string, default: "10000000000000000" = 1e16).
+  - UseVenv   : If true, prefer VenvDir\Scripts\python.exe.
+  - VenvDir   : Virtual environment root (default: Root\rh-env).
+
+Messaging / Helpers
+  - Msg(m)        : Status messages with “[08_core_integral]” prefix (Cyan).
+  - Die(m)        : Throws on fatal errors.
+  - Warn(m)       : Warnings with “[08_core_integral] WARNING:” prefix (Yellow).
+  - Assert-File(p,m): Aborts if a required file is missing.
+  - $ErrorActionPreference = "Stop" so any error halts the stage.
+
+Python Resolver
+  - $Py defaults to "python".
+  - If UseVenv is true:
+      • $PyCandidate = VenvDir\Scripts\python.exe
+      • If found, $Py = $PyCandidate.
+      • If missing, logs a warning and falls back to python on PATH.
+
+Core Inputs (expected from earlier stages)
+  - $BandCert    = CertsDir\band_cert.json
+  - $GammaTail   = CertsDir\gamma_tail.json
+  - $PrimeTail   = CertsDir\prime_tail_envelope.json
+  - $PrimeBlock  = CertsDir\prime_block_norm.json
+  - $GridErr     = CertsDir\grid_error_bound.json
+  - $WeilPsd     = CertsDir\weil_psd_bochner.json
+  - $Continuum   = CertsDir\continuum_operator_cert.json
+  - $DensityJson = CertsDir\density_prover.json
+  - $WindowJson  = CertsDir\window.json
+
+  - Hard assertions:
+      • band_cert.json    (run 01_inputs.ps1)
+      • gamma_tail.json   (run 02_tails.ps1)
+      • prime_tail_envelope.json (run 02_tails.ps1)
+      • prime_block_norm.json    (run 03_prime_block_and_grid.ps1)
+      • grid_error_bound.json    (run 03_prime_block_and_grid.ps1)
+      • weil_psd_bochner.json    (run 04_weil_psd.ps1)
+      • continuum_operator_cert.json (run 05_continuum_rollup.ps1)
+      • window.json              (run 01_inputs.ps1)
+
+  - Soft check:
+      • If density_prover.json is missing, script only warns:
+          “density_prover.json missing; density info may be absent”
+
+Main Outputs
+  - uniform_certificate.json    : CertsDir\uniform_certificate.json
+  - core_interval_prover.json   : CertsDir\core_interval_prover.json
+
+Main Workflow
+
+  1) Uniform rollup certificate → uniform_certificate.json
+     - Paths:
+         • $UniformCert = CertsDir\uniform_certificate.json
+         • $urc         = ToolsDir\uniform_rollup_cert.py
+     - Behavior:
+         • If uniform_rollup_cert.py is found:
+             – If uniform_certificate.json does NOT exist yet:
+                 · Precreates an empty file so Python’s atomic os.replace() pattern succeeds.
+                 · Logs:
+                     “Precreating empty uniform_certificate.json to satisfy atomic rename in uniform_rollup_cert.py”
+             – Logs the command:
+                 “python uniform_rollup_cert.py --T0 $T0 --certs-dir $CertsDir --out $UniformCert --dps $Dps”
+             – Runs:
+                 & $Py $urc `
+                   --T0 "$T0" `
+                   --certs-dir $CertsDir `
+                   --out $UniformCert `
+                   --dps "$Dps"
+         • If uniform_rollup_cert.py is missing:
+             – Warns and skips the uniform certificate step.
+     - Post-check:
+         • If uniform_certificate.json exists:
+             – Msg "uniform_certificate.json created"
+         • Else, if $urc exists:
+             – Warn "uniform_certificate.json not created (check uniform_rollup_cert.py CLI flags or write logic)"
+
+  2) Core finite-interval integral proof → core_interval_prover.json
+     - Paths:
+         • $CoreJson = CertsDir\core_interval_prover.json
+         • $cip      = ToolsDir\core_interval_prover.py
+     - Behavior:
+         • If core_interval_prover.py is found:
+             – Logs the command:
+                 “python core_interval_prover.py --T0 $T0 --window-config $WindowJson --out $CoreJson --dps $Dps”
+             – Runs:
+                 & $Py $cip `
+                   --T0 "$T0" `
+                   --window-config $WindowJson `
+                   --out $CoreJson `
+                   --dps "$Dps"
+         • If core_interval_prover.py is missing:
+             – Warns and skips the finite-interval proof step.
+     - Post-check:
+         • If core_interval_prover.json exists:
+             – Msg "core_interval_prover.json created"
+         • Else, if $cip exists:
+             – Warn "core_interval_prover.json not created (check core_interval_prover.py CLI flags)"
+
+Completion
+  - On completion of both steps (run or skipped as allowed), prints:
+      “Core integral / finite-interval and uniform certificate stage complete.”
+
+Dependencies / Stage Ordering
+  - Must run after:
+      • 01_inputs.ps1                 → window.json, band_cert.json
+      • 02_tails.ps1                  → gamma_tail.json, prime_tail_envelope.json
+      • 03_prime_block_and_grid.ps1   → prime_block_norm.json, grid_error_bound.json
+      • 04_weil_psd.ps1               → weil_psd_bochner.json
+      • 05_continuum_rollup.ps1       → continuum_operator_cert.json
+      • (Optionally) density_prover.json from a prior density stage.
+
+[09_uniform_rollup.ps1] – Uniform Rollup / STP Test Stage (Stub)
+
+Purpose
+  - Intended to orchestrate a “uniform rollup” sweep in T:
+      • T0      – base reference T.
+      • TMin    – start of sweep.
+      • TMax    – end of sweep.
+      • TStep   – step between T values.
+  - As currently written, the core uniform-rollup logic is replaced by "..." (stubbed out).
+  - The only concrete, active behavior is to run an STP test:
+      • stp_test.py → stp_test.json
+
+Parameters
+  - Root      : Base project directory (default: current directory).
+  - ToolsDir  : Path to tools/ (default: Root\tools).
+  - InputsDir : Reserved input path (not used in visible code).
+  - CertsDir  : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - Dps       : Decimal precision for mpmath-based tools (default: 950).
+  - T0        : Base reference height (string, default: "10000000000000000" = 1e16).
+  - TMin      : Start of uniform sweep (string, default: "10000000000000000").
+  - TMax      : End of uniform sweep (string, default: "100000000000000000").
+  - TStep     : Step size in uniform sweep (string, default: "1000000000000000").
+  - UseVenv   : If true, prefer VenvDir\Scripts\python.exe.
+  - VenvDir   : Virtual environment root (no default path; caller must supply or script infers).
+
+Messaging / Helpers
+  - Msg(m)  : Writes status messages with “[09_uniform_rollup]” prefix (Cyan).
+  - Die(m)  : Throws on fatal errors.
+  - (Warn(), Python resolver, and Assert helpers are implied but not shown around the "..." stub.)
+
+STP Test Workflow (Concrete Behavior Present)
+  - Paths:
+      • $StpJson = Join-Path $CertsDir "stp_test.json"
+      • $stp     = Join-Path $ToolsDir "stp_test.py"
+  - If stp_test.py exists:
+      • Runs:
+          & $Py $stp `
+            --out $StpJson `
+            --dps "$Dps"
+      • Here $Py is the resolved Python interpreter (venv or PATH), set in the omitted “...” section.
+  - If stp_test.py does NOT exist:
+      • Warn "stp_test.py not found in $ToolsDir; skipping STP test"
+  - After running:
+      • If stp_test.json exists:
+          – Msg "stp_test.json created"
+      • Else, if stp_test.py exists:
+          – Warn "stp_test.json not created (check stp_test.py CLI flags)"
+
+Completion
+  - Always prints:
+      “Uniform rollup stage complete.”
+
+Notes / Current Limitations
+  - The central uniform-rollup loop/logic is currently missing (represented by "..." in the script).
+  - TMin, TMax, and TStep are defined but not used in the visible code.
+  - As it stands, this stage behaves as a thin wrapper around stp_test.py plus boilerplate messaging.
+
+[10_infinite_analysis.ps1] – Infinite-Analysis / Rv-Mangoldt Bounds Stage
+
+Purpose
+  - Run the “infinite-analysis” stage of the RH toolkit.
+  - Produces the Mangoldt-based infinite-analysis witness:
+      • rv_mangoldt_bounds.json
+    and an optional theory/debug companion:
+      • rv_mangoldt_bounds.theory.json
+
+Parameters
+  - Root      : Base project directory (default: current directory).
+  - ToolsDir  : Path to tools/ (default: Root\tools).
+  - CertsDir  : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - Dps       : Decimal precision for mpmath-based tools (default: 900).
+  - T0        : Base height T0 (string, default: "10000000000000000" = 1e16).
+  - X0        : Legacy/compat parameter for x0 (string, default: "10000000000000000"; may be unused).
+  - UseVenv   : If true, prefer VenvDir\Scripts\python.exe.
+  - VenvDir   : Virtual environment root (default: Root\rh-env).
+
+Messaging / Helpers
+  - Msg(m)        : Status messages with “[10_infinite_analysis]” prefix (Cyan).
+  - Die(m)        : Throws on fatal errors.
+  - Warn(m)       : Warnings with “[10_infinite_analysis] WARNING:” prefix (Yellow).
+  - Assert-File(p,m): Aborts if a required file is missing.
+
+Python Resolver (implied in omitted block)
+  - Resolves $Py similarly to other stages:
+      • If UseVenv is true and VenvDir\Scripts\python.exe exists → use that.
+      • Otherwise fall back to "python" on PATH.
+      • Warns if venv python requested but missing.
+
+Core Tool / Outputs
+  - Python tool:
+      • rv_mangoldt_bounds.py in ToolsDir.
+  - Outputs in CertsDir:
+      • rv_mangoldt_bounds.json          → $RvMain
+      • rv_mangoldt_bounds.theory.json   → $RvTheory
+
+Main Workflow (Conceptual)
+  1) Configure paths
+     - $rv       = Join-Path $ToolsDir "rv_mangoldt_bounds.py"
+     - $RvMain   = Join-Path $CertsDir "rv_mangoldt_bounds.json"
+     - $RvTheory = Join-Path $CertsDir "rv_mangoldt_bounds.theory.json"
+
+  2) Run rv_mangoldt_bounds.py (if present)
+     - If rv_mangoldt_bounds.py exists:
+         • Logs the full python command via Msg, e.g.:
+             & $Py $rv `
+               --T0 "$T0" `
+               --out $RvMain `
+               --theory-out $RvTheory `
+               --dps "$Dps"
+         • Executes the script to generate both main and theory JSON files.
+     - If rv_mangoldt_bounds.py is missing:
+         • Warn "rv_mangoldt_bounds.py not found in $ToolsDir; skipping infinite-analysis witness"
+
+  3) Post-run checks
+     - If rv_mangoldt_bounds.json exists:
+         • Msg "[rv_mangoldt_bounds] ok -> $RvMain"
+     - Else, if rv_mangoldt_bounds.py exists:
+         • Warn "rv_mangoldt_bounds.json not created (check rv_mangoldt_bounds.py CLI flags)"
+
+Completion
+  - Always prints:
+      “Infinite-analysis stage complete.”
+
+Dependencies / Stage Ordering
+  - Uses T0 and Dps consistent with late proof stages.
+  - Only hard dependency is the presence of rv_mangoldt_bounds.py in ToolsDir
+    and a writable CertsDir.
+
+[11_cone_uniform.ps1] – Parametric Cone Uniform Certificate Stage
+
+Purpose
+  - Run a parametric “cone” search in (sigma, k0) around a central point and certify it.
+  - Wraps the Python tool:
+      • param_cone_uniform_cert_v4c.py
+  - Produces:
+      • param_cone_uniform_cert_<ConeName>.json
+      • param_cone_uniform_csv_<ConeName>\  (CSV bundle directory)
+
+Parameters
+  - Root        : Base project directory (default: current directory).
+  - ToolsDir    : Path to tools/ (default: Root\tools).
+  - CertsDir    : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - Grid        : Grid size (default: 8000).
+  - Digits      : Decimal digits for printed output (default: 220; forwarded to tool).
+  - Dps         : Working precision for mpmath-based tools (default: 950).
+
+  - SigmaMid    : Central sigma for cone (string, default: "6.0").
+  - K0Mid       : Central k0 for cone (string, default: "0.25").
+  - SigmaSpan   : Half-width of sigma interval (default: 0.5 → [5.5, 6.5]).
+  - K0Width     : Half-width of k0 interval (default: 0.10 → [0.15, 0.35]).
+  - SigmaSteps  : Number of sigma samples across span (default: 15).
+  - K0Steps     : Number of k0 samples across width (default: 15).
+
+  - LhsTotal    : Target LHS total from global/uniform rollup (default: 1.0).
+  - CriticalLeft  : Left edge of RH critical band (default: 0.3).
+  - CriticalRight : Right edge of RH critical band (default: 2.8).
+  - InnerLeft     : Inner window of band (default: 0.3).
+  - InnerRight    : Inner window of band (default: 2.8).
+
+  - ConeName    : Name tag for this cone (default: "cone_main").
+  - Jobs        : Parallel job count (default: 0 → let tool decide / single-thread).
+  - Executor    : Executor mode string (default: "thread"; passed as --executor if non-empty).
+
+  - UseVenv     : If true, prefer VenvDir\Scripts\python.exe.
+  - VenvDir     : Virtual environment root (default: Root\rh-env).
+
+Messaging / Helpers
+  - Msg(m)        : Status messages with “[11_cone_uniform]” prefix (Cyan).
+  - Die(m)        : Throws on fatal errors.
+  - Warn(m)       : Warnings with “[11_cone_uniform] WARNING:” prefix (Yellow).
+  - Assert-File(p,m): Aborts if a required file is missing.
+  - $ErrorActionPreference = "Stop" so any error halts the stage.
+
+Python Resolver
+  - $Py defaults to "python".
+  - If UseVenv is true:
+      • $PyCandidate = VenvDir\Scripts\python.exe
+      • If it exists, $Py = $PyCandidate.
+      • Otherwise Warn and fall back to python on PATH.
+
+Upstream Certificates / Sanity Checks
+  - $BandCert   = CertsDir\band_cert.json
+  - $Uniform    = CertsDir\uniform_certificate.json
+  - $Continuum  = CertsDir\continuum_operator_cert.json
+  - $Density    = CertsDir\density_prover.json
+
+  - Hard asserts:
+      • band_cert.json       (run 01_inputs.ps1)
+      • continuum_operator_cert.json (run 05_continuum_rollup.ps1)
+
+  - Soft checks:
+      • If uniform_certificate.json exists:
+          – Logs that LhsTotal can be matched against it.
+        Else:
+          – Warns that uniform certificate is missing and proceeds with given LhsTotal.
+      • If density_prover.json is missing:
+          – Warns that cone cert may be less sharp.
+
+Cone Range Logging
+  - Converts SigmaMid, K0Mid to doubles and computes:
+      • SigmaMin = SigmaMidVal - SigmaSpan
+      • SigmaMax = SigmaMidVal + SigmaSpan
+      • K0Min    = K0MidVal   - K0Width
+      • K0Max    = K0MidVal   + K0Width
+  - Logs:
+      “Sigma in [SigmaMin, SigmaMax], K0 in [K0Min, K0Max], ConeName=...”
+
+Outputs
+  - OutJson = CertsDir\param_cone_uniform_cert_<ConeName>.json
+  - CsvDir  = CertsDir\param_cone_uniform_csv_<ConeName>
+  - Ensures CsvDir exists (creates directory if missing).
+
+Tool & Arguments
+  - Tool path:
+      • $Tool = ToolsDir\param_cone_uniform_cert_v4c.py
+      • Assert-File $Tool "param_cone_uniform_cert_v4c.py not found in $ToolsDir"
+
+  - Base argument list ($args) mirrors current Python CLI:
+      --sigma-mid      SigmaMid
+      --sigma-span     SigmaSpan
+      --sigma-steps    SigmaSteps
+      --k0-mid         K0Mid
+      --k0-width       K0Width
+      --k0-steps       K0Steps
+      --lhs-total      LhsTotal
+      --grid           Grid
+      --digits         Digits
+      --critical-left  CriticalLeft
+      --critical-right CriticalRight
+      --inner-left     InnerLeft
+      --inner-right    InnerRight
+      --csv-dir        CsvDir
+      --dps            Dps
+      --out            OutJson
+
+  - Optional args:
+      • If Jobs > 0:
+           --jobs Jobs
+      • If Executor is non-empty:
+           --executor Executor
+
+Main Workflow
+  1) Resolve paths, venv, and upstream certs.
+  2) Log stage header and basic configuration (Root, ToolsDir, CertsDir, Dps).
+  3) Compute and log sigma/k0 cone bounds.
+  4) Ensure CSV output directory exists.
+  5) Build $args as above, adding optional jobs/executor flags.
+  6) Log the exact Python command:
+         “python param_cone_uniform_cert_v4c.py …”
+  7) Run:
+         & $Py $Tool $args
+  8) Assert:
+         • OutJson exists after run, otherwise fail with a clear message.
+
+Completion
+  - On success, prints:
+      “Cone uniform cert stage complete.”
+
+[12_rolling_t.ps1] – Rolling-T Uniform Sweep Stage
+
+Purpose
+  - Run a single-interval “rolling T” uniform certificate sweep.
+  - Wraps:
+      • rolling_T_uniform_cert_v3.py
+  - Produces:
+      • rolling_T_uniform_cert.json
+
+Parameters
+  - Root         : Base project directory (default: current directory).
+  - ToolsDir     : Path to tools/ (default: Root\tools).
+  - CertsDir     : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+
+  - T0           : Start of T interval (default: "1e16").
+  - T1           : End of T interval (default: "1e20").
+  - DeltaTarget  : Target tolerance for rolling-T error (default: "1e-12").
+  - MeshInitial  : Initial mesh size (default: 256).
+  - MeshMax      : Maximum mesh size (default: 131072).
+
+  - Dps          : Working precision for mpmath-based tools (default: 950).
+  - (Other standard flags like UseVenv/VenvDir and helper functions are implied but not shown in the clipped snippet.)
+
+Messaging / Helpers
+  - Msg(m)  : Status messages with “[12_rolling_t]” prefix (standard pattern).
+  - Die(m)  : Throws on fatal errors.
+  - $LASTEXITCODE is checked after Python call; non-zero exit triggers Die.
+
+Python Tool / Arguments
+  - Tool:
+      • rolling_T_uniform_cert_v3.py in ToolsDir.
+  - Output:
+      • $OutFile = Join-Path $CertsDir "rolling_T_uniform_cert.json"
+  - Arguments (ArgsList):
+      --packet-dir  <CertsDir>
+      --T0          <T0>
+      --T1          <T1>
+      --delta-target <DeltaTarget>
+      --mesh-initial <MeshInitial>
+      --mesh-max    <MeshMax>
+      --dps         <Dps>
+      --digits      220
+      --out         <OutFile>
+
+Main Workflow
+  1) Build $ArgsList with the parameters above.
+  2) Log the full Python command via:
+         Msg "python $($ArgsList -join ' ')"
+  3) Execute:
+         & $Py @ArgsList
+     - $Py is the resolved Python interpreter (venv or PATH) from the standard toolkit pattern.
+  4) Check $LASTEXITCODE:
+      - If non-zero → Die "rolling_T_uniform_cert_v3.py exited with code $ec".
+  5) Check for output file:
+      - If rolling_T_uniform_cert.json exists:
+          • Msg "rolling_T_uniform_cert.json created"
+      - Else:
+          • Die "Expected output not found: $OutFile"
+
+Completion
+  - On success, this stage leaves:
+      • rolling_T_uniform_cert.json in CertsDir
+    representing a uniform-in-T certificate over [T0, T1] with adaptive mesh control.
+
+[13_report_wrap.ps1] – Final Report Wrap Stage
+
+Purpose
+  - Generate the final “wrapped” proof report after all other stages are complete.
+  - Wraps the Python tool:
+      • better_report_wrap.py
+  - Produces:
+      • report_wrap.json   – machine-readable summary of all certs.
+      • report_wrap.md     – human-readable Markdown report.
+
+Parameters
+  - Root       : Base project directory (default: current directory).
+  - ToolsDir   : Path to tools/ (default: Root\tools).
+  - CertsDir   : Path to PROOF_PACKET (default: Root\PROOF_PACKET).
+  - InputsDir  : Path to packs\rh\inputs (default: Root\packs\rh\inputs).
+  - Dps        : Decimal precision for any high-precision math in the wrap (default: 900).
+  - UseVenv    : If set, prefer Python from a venv.
+  - VenvDir    : Virtual environment root (default: Root\rh-env if not provided).
+
+Messaging / Helpers
+  - Msg(m)           : Status messages with “[13_report_wrap]” prefix (Cyan).
+  - Die(m)           : Throws on fatal errors (“[13_report_wrap] FATAL: …”).
+  - Resolve-PathSafe(p):
+      • Returns "" for empty/null input, otherwise resolves the path safely.
+      • Used to normalize Root/ToolsDir/CertsDir/InputsDir.
+
+Path Resolution / Defaults
+  - Normalizes Root, ToolsDir, CertsDir, InputsDir using Resolve-PathSafe.
+  - If ToolsDir is empty → ToolsDir = Root\tools.
+  - If CertsDir is empty → CertsDir = Root\PROOF_PACKET.
+  - If InputsDir is empty → InputsDir = Root\packs\rh\inputs.
+
+Python Resolver
+  - PythonExe default: "python".
+  - If UseVenv:
+      • If VenvDir is empty → VenvDir = Root\rh-env.
+      • PythonExeCandidate = VenvDir\Scripts\python.exe
+      • If that file exists:
+           PythonExe = PythonExeCandidate
+        Else:
+           Falls back to "python" (no fatal error).
+
+Outputs
+  - outJson = CertsDir\report_wrap.json
+  - outMd   = CertsDir\report_wrap.md
+
+Main Workflow
+  1) Log basic configuration:
+       - Root, ToolsDir, CertsDir, InputsDir, Dps, and PythonExe.
+  2) Build argument list for better_report_wrap.py:
+       - Script path: better_report_wrap.py in ToolsDir.
+       - Args:
+           --packet-dir  CertsDir
+           --inputs-dir  InputsDir
+           --out-md      outMd
+           --out-json    outJson
+           --dps         Dps
+  3) Run:
+       & PythonExe @argsList
+     - If $LASTEXITCODE -ne 0 → Die "better_report_wrap.py failed with exit code $LASTEXITCODE".
+
+Completion
+  - On success, prints:
+      “Report wrap written:”
+      “  JSON : <path to report_wrap.json>”
+      “  Markdown : <path to report_wrap.md>”

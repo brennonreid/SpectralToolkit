@@ -5,7 +5,7 @@ Param(
     [string]$CertsDir  = "",
     [int]$Dps          = 950,
 
-    [int]$Grid         = 10000,
+    [int]$Grid         = 12000,
     [double]$CritLeft  = 0.30,
     [double]$CritRight = 2.80,
     [double]$Sigma     = 6.0,

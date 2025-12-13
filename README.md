@@ -20,30 +20,19 @@ This project is computational and geometric in nature. It does **not** introduce
 The code in this repository supports:
 
 - High-precision evaluation of ζ(s) using **GMP / MPFR / MPC / Arb**
-- Direct sampling of the raw magnitude `|ζ(σ+iT)|` without smoothing
+- Direct sampling of the raw magnitude `|ζ(σ+iT)|`
 - Detection of:
   - cusp minima at nontrivial zeros
   - critical-line channeling (`σ → 1/2`)
   - rigid basin separation (including Lehmer pairs)
   - integer-barrier wall formation
   - catastrophic collapse under adversarial perturbation
-- Deterministic, reproducible numerical experiments (no heuristic snapping)
-
-The system treats the zeta magnitude as a **non-smooth energy functional**, not as a squared norm or log-potential.
-
----
-
-## What this toolkit intentionally does *not* do
-
 - No `|ζ|²`, no `log |ζ|`, no mollifiers
 - No smoothing to make things “nicer”
 - No projection onto known zero tables
 - No artificial locking, snapping, or rounding toward expected results
-- No claim of a formal proof of the Riemann Hypothesis
 
-If smoothing makes your result look better, this toolkit considers that a failure mode — not a feature.
-
----
+The system treats the zeta magnitude as a **non-smooth energy functional**, not as a squared norm or log-potential.
 
 ## Repository layout (high-level)
 
@@ -140,20 +129,6 @@ Instead, it explores whether the **raw zeta magnitude itself already behaves lik
 - adversarial perturbations cause topological collapse
 
 Whether this ultimately supports or undermines Hilbert–Pólya is left open — but the computational evidence is explicit and inspectable.
-
----
-
-## Status
-
-Active research code.
-
-This is not a library.  
-This is not a finished theory.  
-This is not a toy.
-
-It is a working computational apparatus designed to answer one question honestly:
-
-> *What does the Riemann zeta function actually do when you stop smoothing it?*
 
 ---
 

@@ -28,9 +28,8 @@
         "-fdiagnostics-color=always",
         "-g",
 
-        // 👇 this is the key change
-        "${file}",                        // active file instead of hard-coded plot_energy.cpp
-        "C:/CToolkitV1/zeta_mpc.cpp",     // always link against zeta_mpc
+        "${file}",                        
+        "C:/CToolkitV1/zeta_mpc.cpp",     
 
         "-o",
         "${fileDirname}/${fileBasenameNoExtension}.exe",
@@ -41,7 +40,7 @@
         "-lmpfr",
         "-lgmp",
         "-lgmpxx",
-        "-lflint",
+        "-lflint"
       ],
       "options": {
         "cwd": "C:/msys64/ucrt64/bin"

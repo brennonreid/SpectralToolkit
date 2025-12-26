@@ -1,51 +1,48 @@
-// nsniper.cpp
+// nsniperv2.cpp
 //
-// Behavior (per your spec):
-// - Always apply the jump (CAP or FIT), regardless of size.
-// - Track fractional digits only (Lvl column).
-// - Internal working fractional precision can overshoot depth.
-// - After each jump, if work_frac_digits >= depth:
-//     * If == depth: compute energy at t_work and finish.
-//     * If  > depth: strict-truncate (no rounding) to exactly depth frac digits,
-//                    compute energy at truncated value, and finish.
+// Closure-stable Johansson-digit matching version.
+// Fix: DO NOT convert Arb values through arf_get_str()/scientific notation for state updates.
+// Use arf_get_fmpz_2exp() to convert jump midpoints exactly to Decimal,
+// then apply update in Decimal and strict-truncate (never round).
 //
-// Additional rule (your last request):
-// - If launched with --dir down (or up), force that direction until the first "lock" occurs.
-// - Definition of "lock": first time CAP engages (|raw_jump| > cap).
-// - Once lock is found, permanently switch direction to auto.
+// Policy:
+// - State update is ALWAYS Decimal arithmetic.
+// - CAP is exact Decimal +/- 10^-k (integer start uses 0.1).
+// - FIT jump computed in Arb, converted exactly via mantissa+2exp, then truncated.
+// - After each update, strict truncate t_work to intended fractional digits.
+// - When reaching depth: jump, then truncate to exactly depth, stop. No extra adjustments.
 //
-// Important directional semantics:
-// - We apply direction forcing to BOTH CAP and FIT before lock.
-//   This guarantees "it should go down" until lock.
-// - Update step is: t_next = t_work - safe_jump
-//     * For DOWN: safe_jump must be +|jump|  (t decreases)
-//     * For UP:   safe_jump must be -|jump|  (t increases)
-//     * For AUTO: safe_jump is chosen by CAP rule or Newton FIT sign
+// NEW (your request):
+// - Print FINAL_SLOPE(mid) at FULL FIXED DECIMAL precision (exactly args.depth decimals),
+//   with NO rounding and NO scientific notation.
 //
-// Notes:
-// - No rounding anywhere in the final truncation.
-// - No "stall" logic at depth; overshoot mode makes "jump < 1e-depth" irrelevant.
-// - Minimal changes; no speculative refactors.
+// NEW (your request #2):
+// - Track ratio of energy loss each step:
+//     E_ratio = E_next / E_now
+//     Drop%   = (1 - E_ratio) * 100
+// - Display per step
+// - Cache last ratio + drop% and print in wrap-up (fixed, args.depth decimals, truncate only)
 //
-// CHANGE (per your request):
-// 1) Replace hard-coded step cap (25) with dynamic --max_step (default 25).
-// 2) Reinstate truncation rule: in pow-mode growth is "double minus 1 digit".
-// 3) Add FIT "shortcut": if a FIT jump magnitude implies far more precision than
-//    the planned step schedule, accept it and mark output status as [FIT*].
-// 4) FINAL WRAP-UP: when depth is met, print a qualified FINAL_SLOPE(mid) using
-//    a depth-tied probe step, without changing the per-row slope display.
+// NEW (print fixes, your request now):
+// 1) FINAL SINK ENERGY should not print as 0 due to args.depth truncation.
+//    Use DISPLAY-ONLY adaptive fixed formatting (no scientific notation) so small values show.
+// 2) Final output should avoid trailing zeros unless necessary (DISPLAY-ONLY).
+//    Keep FINAL_SLOPE(mid) and FINAL T VALUE strict fixed-width; trim ratio/drop and final energy.
 //
-// DPS rigor preserved:
-// - compute_dps still based on integer_digits + internal_max_frac + guard(64).
-// - any output conversion sig-hint guard tied to args.max_step.
+// Build:
+//   g++ -O2 -std=c++17 nsniperv2.cpp -lflint -lgmp -lmpfr -o nsniperv2
 
 #include <iostream>
 #include <string>
 #include <iomanip>
 #include <cstdlib>
+#include <cctype>
 
 #include "decimal.hpp"
 #include "arb_interface.hpp"
+
+#include <flint/arf.h>
+#include <flint/fmpz.h>
 
 // -----------------------------
 // Helpers
@@ -96,10 +93,6 @@ static std::string fixed_trunc_str_decimal_exact(const Decimal &val, int decimal
     bool neg = (x < Decimal(0));
     if (neg) x = -x;
 
-    mpz_class int_part;
-    mpz_class frac_part;
-    mpz_class scale;
-
     if (decimals == 0) {
         Decimal t = strict_truncate_toward0(x, 0);
         std::string s = decimal_to_string(t, 0);
@@ -107,14 +100,14 @@ static std::string fixed_trunc_str_decimal_exact(const Decimal &val, int decimal
         return s;
     }
 
-    scale = pow10_z(decimals);
+    mpz_class scale = pow10_z(decimals);
 
     // scaled_int = trunc(x * scale)
     Decimal scaled = strict_truncate_toward0(x * Decimal(scale), 0);
     mpz_class scaled_int = scaled.get_num() / scaled.get_den();
 
-    int_part = scaled_int / scale;
-    frac_part = scaled_int % scale;
+    mpz_class int_part = scaled_int / scale;
+    mpz_class frac_part = scaled_int % scale;
 
     std::string int_str = int_part.get_str();
     std::string frac_str = frac_part.get_str();
@@ -135,33 +128,6 @@ static slong dps_to_bits(int dps) {
     return (slong)bits;
 }
 
-// Scientific-notation aware Decimal parser wrapper.
-// Accepts: [-]digits[.digits][e[+-]digits]
-static Decimal decimal_from_string_allow_exp(const std::string &s) {
-    return decimal_from_string(s);
-}
-
-// Convert arb midpoint to a string using arf_get_str(mid, sig_digits).
-static std::string arb_mid_to_string_sig(const arb_t x, int sig_digits) {
-    const arf_struct *mid = arb_midref(x);
-    char *cstr = arf_get_str(mid, sig_digits);
-    std::string s(cstr);
-    flint_free(cstr);
-    return s;
-}
-
-// Convert arb midpoint to Decimal and strict-truncate toward 0 to `decimals`.
-static Decimal arb_mid_to_decimal_strict_trunc(const arb_t x, int decimals, int sig_digits_hint) {
-    const arf_struct *mid = arb_midref(x);
-
-    char *cstr = arf_get_str(mid, sig_digits_hint);
-    std::string s(cstr);
-    flint_free(cstr);
-
-    Decimal v = decimal_from_string_allow_exp(s);
-    return strict_truncate_toward0(v, decimals);
-}
-
 // Count integer digits (no sign) of current Decimal.
 static int count_int_digits(const Decimal &x) {
     Decimal t_int = strict_truncate_toward0(x, 0);
@@ -172,22 +138,236 @@ static int count_int_digits(const Decimal &x) {
     return d;
 }
 
-// Parse base-10 exponent from an "m e exp" style string (e.g. "-7.27e-841").
-// Returns true if exponent parsed; false if not found.
-static bool parse_exp10_from_sci(const std::string &s, long long &out_exp10) {
-    size_t epos = s.find('e');
-    if (epos == std::string::npos) epos = s.find('E');
-    if (epos == std::string::npos) return false;
-
-    std::string exp_part = s.substr(epos + 1);
-    if (exp_part.empty()) return false;
-
-    try {
-        out_exp10 = std::stoll(exp_part);
-        return true;
-    } catch (...) {
-        return false;
+// Arb midpoint to string (DISPLAY ONLY).
+static std::string arb_mid_to_string_sig(const arb_t x, int sig_digits) {
+    const arf_struct *mid = arb_midref(x);
+    char *cstr = arf_get_str(mid, sig_digits);
+    if (!cstr) {
+        std::cerr << "ERROR: arf_get_str failed\n";
+        std::exit(1);
     }
+    std::string s(cstr);
+    flint_free(cstr);
+    return s;
+}
+
+// Convert arf exactly via mantissa * 2^exp2, then strict-truncate toward 0 to `decimals`.
+static Decimal arf_mid_to_decimal_exact_trunc_pow10(const arf_struct *mid, int decimals) {
+    if (decimals < 0) {
+        std::cerr << "ERROR: decimals must be >= 0\n";
+        std::exit(1);
+    }
+
+    if (arf_is_zero(mid)) return Decimal(0);
+
+    fmpz_t m_f;
+    fmpz_init(m_f);
+
+    slong e2 = 0;
+    arf_get_fmpz_2exp(m_f, &e2, mid);
+
+    char *m_str = fmpz_get_str(NULL, 10, m_f);
+    if (!m_str) {
+        std::cerr << "ERROR: fmpz_get_str failed\n";
+        std::exit(1);
+    }
+    mpz_class m_mpz(m_str);
+    flint_free(m_str);
+    fmpz_clear(m_f);
+
+    Decimal r;
+    if (e2 >= 0) {
+        mpz_class two_pow = mpz_class(1) << (unsigned long)e2;
+        r = Decimal(m_mpz * two_pow);
+    } else {
+        mpz_class two_pow = mpz_class(1) << (unsigned long)(-e2);
+        r = Decimal(m_mpz, two_pow);
+    }
+
+    return strict_truncate_toward0(r, decimals);
+}
+
+static Decimal arb_mid_to_decimal_exact_trunc(const arb_t x, int decimals) {
+    const arf_struct *mid = arb_midref(x);
+    return arf_mid_to_decimal_exact_trunc_pow10(mid, decimals);
+}
+
+// -----------------------------
+// DISPLAY helpers (no effect on state updates)
+// -----------------------------
+
+// Trim trailing zeros after decimal point; remove '.' if it becomes the last char.
+// Keeps sign intact.
+static std::string trim_trailing_zeros_fixed(std::string s) {
+    if (s.find('e') != std::string::npos || s.find('E') != std::string::npos) return s;
+
+    size_t dot = s.find('.');
+    if (dot == std::string::npos) return s;
+
+    while (!s.empty() && s.back() == '0') s.pop_back();
+    if (!s.empty() && s.back() == '.') s.pop_back();
+
+    if (s == "-0") s = "0";
+    return s;
+}
+
+// Convert scientific string like "-3.8202792979e-40" to fixed decimal (no exponent).
+// DISPLAY ONLY (arf_get_str rounds). If max_decimals >= 0, truncate to at most that many.
+static std::string sci_to_fixed_noexp_trunc(const std::string &sci, int max_decimals) {
+    std::string s = sci;
+    if (s == "0" || s == "+0" || s == "-0") return "0";
+
+    bool neg = false;
+    if (!s.empty() && (s[0] == '+' || s[0] == '-')) {
+        neg = (s[0] == '-');
+        s.erase(0, 1);
+    }
+
+    std::string mant = s;
+    long long exp10 = 0;
+
+    size_t epos = s.find_first_of("eE");
+    if (epos != std::string::npos) {
+        mant = s.substr(0, epos);
+        std::string ex = s.substr(epos + 1);
+        exp10 = std::stoll(ex);
+    }
+
+    long long frac_digits = 0;
+    size_t dpos = mant.find('.');
+    if (dpos != std::string::npos) {
+        frac_digits = (long long)(mant.size() - dpos - 1);
+        mant.erase(dpos, 1);
+    }
+
+    while (mant.size() > 1 && mant[0] == '0') mant.erase(0, 1);
+
+    long long shift = exp10 - frac_digits;
+
+    std::string out;
+    if (shift >= 0) {
+        out = mant;
+        out.append((size_t)shift, '0');
+    } else {
+        long long k = -shift;
+        if ((long long)mant.size() > k) {
+            size_t cut = mant.size() - (size_t)k;
+            out = mant.substr(0, cut) + "." + mant.substr(cut);
+        } else {
+            out = "0.";
+            out.append((size_t)(k - (long long)mant.size()), '0');
+            out += mant;
+        }
+    }
+
+    if (neg && out != "0") out = "-" + out;
+
+    if (max_decimals >= 0) {
+        size_t dot = out.find('.');
+        if (dot != std::string::npos) {
+            size_t have = out.size() - dot - 1;
+            if ((int)have > max_decimals) {
+                out.erase(dot + 1 + (size_t)max_decimals);
+                if (max_decimals == 0) out.erase(dot, 1);
+            }
+        }
+    }
+
+    return out;
+}
+
+// Prints: LABEL: [mid +/- rad]   (with `digits` significant digits)
+// NOTE: display-only; does not affect state updates.
+static void print_arb_bracket(const char* label, const arb_t x, slong digits)
+{
+    std::cout << label << ": ";
+    arb_printn(x, digits, 0); // [mid +/- rad]
+    std::cout << "\n";
+}
+
+// Arb midpoint -> fixed decimal, adaptive enough to avoid printing as 0
+// when truncating to args.depth would underflow.
+// DISPLAY ONLY.
+static std::string arb_mid_to_fixed_decimal_adaptive_trim(const arb_t x, int sig_digits, int max_decimals) {
+    const arf_struct *mid = arb_midref(x);
+
+    if (arf_is_zero(mid)) return "0";
+
+    // 1) First attempt: existing behavior
+    {
+        char *cstr = arf_get_str(mid, sig_digits);
+        if (!cstr) {
+            std::cerr << "ERROR: arf_get_str failed\n";
+            std::exit(1);
+        }
+        std::string sci(cstr);
+        flint_free(cstr);
+
+        std::string fixed = sci_to_fixed_noexp_trunc(sci, max_decimals);
+        fixed = trim_trailing_zeros_fixed(fixed);
+
+        if (fixed != "0") return fixed;
+    }
+
+    // 2) If it would show as 0 but is nonzero, estimate decimal exponent
+    //    using mantissa * 2^e2 from arf_get_fmpz_2exp().
+    fmpz_t m_f;
+    fmpz_init(m_f);
+    slong e2 = 0;
+    arf_get_fmpz_2exp(m_f, &e2, mid);
+
+    // magnitude(m) in bits
+    slong m_bits = fmpz_bits(m_f);
+    if (m_bits < 1) m_bits = 1;
+
+    // Rough log10(|m|) from bit-length: log10(m) ~= (bits-1)*log10(2)
+    // Then log10(|mid|) ~= log10(|m|) + e2*log10(2)
+    const long double LOG10_2 = 0.30102999566398119521L;
+
+    long double log10_m_lo = (long double)(m_bits - 1) * LOG10_2;
+    long double log10_mid  = log10_m_lo + (long double)e2 * LOG10_2;
+
+    // decimal exponent floor
+    long long exp10 = (long long) (log10_mid >= 0 ? (long long)log10_mid : (long long)(log10_mid - 1.0L));
+
+    // If exp10 is very negative, we need about (-exp10 + guard) decimals to show first nonzero.
+    long long needed_decimals = 0;
+    if (exp10 < 0) {
+        needed_decimals = (-exp10) + 8; // guard digits for readability
+    } else {
+        needed_decimals = 0;
+    }
+
+    fmpz_clear(m_f);
+
+    // Respect a minimum of max_decimals (your old behavior), but allow more when needed.
+    // Put a hard cap so logs don't explode accidentally.
+    long long use_decimals_ll = (long long)max_decimals;
+    if (needed_decimals > use_decimals_ll) use_decimals_ll = needed_decimals;
+
+    const long long HARD_CAP = (long long)max_decimals + 1000; // display-only, bounded growth
+    if (use_decimals_ll > HARD_CAP) use_decimals_ll = HARD_CAP;
+
+    int use_decimals = (use_decimals_ll < 0) ? 0 : (int)use_decimals_ll;
+
+    // 3) Re-render with more decimals
+    char *c2 = arf_get_str(mid, sig_digits * 2);
+    if (!c2) {
+        std::cerr << "ERROR: arf_get_str failed\n";
+        std::exit(1);
+    }
+    std::string sci2(c2);
+    flint_free(c2);
+
+    std::string fixed2 = sci_to_fixed_noexp_trunc(sci2, use_decimals);
+    fixed2 = trim_trailing_zeros_fixed(fixed2);
+
+    // If still "0" (possible if HARD_CAP too low), fall back to scientific string.
+    if (fixed2 == "0") {
+        return sci2; // last resort display-only
+    }
+
+    return fixed2;
 }
 
 // -----------------------------
@@ -196,18 +376,10 @@ static bool parse_exp10_from_sci(const std::string &s, long long &out_exp10) {
 struct Args {
     std::string t = "14.134";
     int max_steps = 200;
-
-    // user-facing: exact fractional digits requested
     int depth = 400;
-
-    // Direction control until lock; after lock becomes auto
-    std::string dir = "auto";   // auto|up|down
-
-    // Overshoot fractional digits beyond depth for internal work state
     int overshoot_frac = 32;
-
-    // Dynamic cap for step_size (replaces hard-coded 25)
     int max_step = 25;
+    std::string dir = "auto";
 };
 
 static Args parse_args(int argc, char **argv) {
@@ -235,13 +407,6 @@ static Args parse_args(int argc, char **argv) {
                 std::cerr << "ERROR: --depth must be >= 0\n";
                 std::exit(1);
             }
-        } else if (k == "--dir") {
-            require_value(k);
-            a.dir = argv[++i];
-            if (a.dir != "auto" && a.dir != "up" && a.dir != "down") {
-                std::cerr << "ERROR: --dir must be one of: auto | up | down\n";
-                std::exit(1);
-            }
         } else if (k == "--overshoot_frac") {
             require_value(k);
             a.overshoot_frac = std::stoi(argv[++i]);
@@ -256,6 +421,13 @@ static Args parse_args(int argc, char **argv) {
                 std::cerr << "ERROR: --max_step must be >= 1\n";
                 std::exit(1);
             }
+        } else if (k == "--dir") {
+            require_value(k);
+            a.dir = argv[++i];
+            if (a.dir != "auto" && a.dir != "up" && a.dir != "down") {
+                std::cerr << "ERROR: --dir must be one of: auto | up | down\n";
+                std::exit(1);
+            }
         } else {
             std::cerr << "ERROR: Unknown argument: " << k << "\n";
             std::exit(1);
@@ -264,35 +436,45 @@ static Args parse_args(int argc, char **argv) {
     return a;
 }
 
+// Print arb midpoint as fixed decimal with exactly `decimals` digits after the point,
+// truncation only, no rounding, no scientific notation. (May underflow to "0....0".)
+static std::string arb_mid_to_fixed_decimal_trunc(const arb_t x, int decimals) {
+    Decimal mid_dec = arb_mid_to_decimal_exact_trunc(x, decimals);
+    return fixed_trunc_str_decimal_exact(mid_dec, decimals);
+}
+
 // -----------------------------
 // Main
 // -----------------------------
 int main(int argc, char **argv) {
     Args args = parse_args(argc, argv);
 
-    std::string t_string = trim(args.t);
-    Decimal t_work = decimal_from_string_allow_exp(t_string);
+    std::string t_string = trim(args.t);                 // from decimal.hpp
+    Decimal t_work = decimal_from_string(t_string);
 
-    // starting fractional digits tracked (from input string)
-    int work_frac_digits = count_decimals_str(t_string);
+    int work_frac_digits = count_decimals_str(t_string); // from decimal.hpp
 
-    // Internal max fractional digits we may keep in t_work
     const int internal_max_frac = args.depth + args.overshoot_frac;
 
-    // Choose compute dps based on integer digits + internal_max_frac + guard(64)
     int start_int_digits = count_int_digits(t_work);
-    int compute_dps = (start_int_digits + internal_max_frac) + 64;
-
+    int compute_dps = (start_int_digits + internal_max_frac) + args.max_step + 256;
     slong prec_bits = dps_to_bits(compute_dps);
-    ArbZetaContext ctx(prec_bits);
 
+    ArbZetaContext ctx(prec_bits);
     const Decimal sigma = Decimal(1, 2);
 
-    // Direction starts as user-specified, but switches to auto after first CAP ("lock").
     std::string dir_effective = args.dir;
     bool lock_found = false;
 
-    // Startup banner
+    // cache slope(mid) for final report (Decimal, fixed output, no rounding).
+    Decimal final_slope_mid_dec(0);
+    bool have_final_slope = false;
+
+    // cache final energy ratio/drop (Decimal, fixed output, no rounding).
+    Decimal final_energy_ratio_dec(0);    // E_next / E_now
+    Decimal final_energy_drop_pct_dec(0); // (1 - ratio) * 100
+    bool have_final_energy_ratio = false;
+
     std::cout << "DEPTH (exact frac digits): " << args.depth << "\n";
     std::cout << "OVERSHOOT_FRAC:            " << args.overshoot_frac << "\n";
     std::cout << "INTERNAL_MAX_FRAC:         " << internal_max_frac << " (depth + overshoot)\n";
@@ -307,7 +489,9 @@ int main(int argc, char **argv) {
               << std::setw(6)  << "Grow" << " | "
               << std::setw(8)  << "Status" << " | "
               << std::setw(28) << "Slope(mid)" << " | "
-              << std::setw(28) << "Jump(mid)" << " | "
+              << std::setw(28) << "Jump(mid)"  << " | "
+              << std::setw(18) << "E_ratio"    << " | "
+              << std::setw(18) << "Drop%"      << " | "
               << "t_address"
               << " | "
               << "Energy"
@@ -317,7 +501,11 @@ int main(int argc, char **argv) {
     int total_steps = 0;
 
     arb_t e_now, e_plus, diff, slope, raw_jump, abs_raw_jump;
-    arb_t h_arb, cap_arb, safe_jump, t_work_arb, t_next_arb;
+    arb_t h_arb, cap_arb, safe_jump;
+
+    // energy-after + ratio/drop metrics
+    arb_t e_after, e_ratio, e_drop_pct, one_arb, hundred_arb, tmp_arb;
+
     arb_init(e_now);
     arb_init(e_plus);
     arb_init(diff);
@@ -327,14 +515,20 @@ int main(int argc, char **argv) {
     arb_init(h_arb);
     arb_init(cap_arb);
     arb_init(safe_jump);
-    arb_init(t_work_arb);
-    arb_init(t_next_arb);
+
+    arb_init(e_after);
+    arb_init(e_ratio);
+    arb_init(e_drop_pct);
+    arb_init(one_arb);
+    arb_init(hundred_arb);
+    arb_init(tmp_arb);
+
+    arb_one(one_arb);
+    arb_set_si(hundred_arb, 100);
 
     while (total_steps < args.max_steps) {
         total_steps += 1;
 
-        // Growth schedule based on current fractional digits tracked
-        // IMPORTANT: pow-mode uses "double minus 1 digit" rule.
         int step_size_raw;
         std::string grow_mode;
         if (work_frac_digits < 5) {
@@ -345,13 +539,9 @@ int main(int argc, char **argv) {
             grow_mode = "pow";
         }
 
-        // Cap intended step by --max_step
         int step_size_capped = step_size_raw;
         if (step_size_capped > args.max_step) step_size_capped = args.max_step;
 
-        // Apply truncation rule:
-        // - ramp: +1
-        // - pow:  +(capped - 1)  (double minus 1 digit)
         int step_size_eff;
         if (work_frac_digits < 5) {
             step_size_eff = 1;
@@ -363,18 +553,20 @@ int main(int argc, char **argv) {
         int target_frac = work_frac_digits + step_size_eff;
         if (target_frac > internal_max_frac) target_frac = internal_max_frac;
 
-        // Probe & slope depth (use target_frac + small guard)
-        int probe_depth = target_frac + 5;
+        int probe_depth;
+        if (step_size_capped == args.max_step) {
+            probe_depth = args.depth + 64;
+        } else {
+            probe_depth = target_frac + 5;
+        }
+        if (probe_depth > internal_max_frac) probe_depth = internal_max_frac;
+        if (probe_depth < 1) probe_depth = 1;
+
         Decimal h_dec(1, pow10_z(probe_depth));
         ctx.arb_set_decimal_safe(h_arb, h_dec);
 
         ctx.compute(t_work, sigma);
         arb_set(e_now, ctx.abs_z);
-
-        if (arb_is_zero(e_now)) {
-            // Perfect zero at current working state; still honor depth rule for output.
-            break;
-        }
 
         Decimal t_plus = t_work + h_dec;
         ctx.compute(t_plus, sigma);
@@ -389,37 +581,30 @@ int main(int argc, char **argv) {
 
         arb_div(raw_jump, e_now, slope, prec_bits);
 
-        // Clamp (movement cap = 10^-work_frac_digits; integer start uses 0.1)
         Decimal cap_dec(1, pow10_z(work_frac_digits));
-        if (work_frac_digits == 0) {
-            cap_dec = Decimal(1, 10); // 0.1
-        }
+        if (work_frac_digits == 0) cap_dec = Decimal(1, 10);
         ctx.arb_set_decimal_safe(cap_arb, cap_dec);
 
         arb_abs(abs_raw_jump, raw_jump);
         bool is_cap = arb_gt(abs_raw_jump, cap_arb);
 
-        // "Lock" rule: first time CAP engages, switch to auto permanently.
         if (is_cap && !lock_found) {
             lock_found = true;
             dir_effective = "auto";
         }
 
-        std::string status;
+        std::string status = is_cap ? "[CAP]" : "[FIT]";
         int next_work_frac = work_frac_digits;
 
         if (is_cap) {
-            status = "[CAP]";
+            if (work_frac_digits == 0) next_work_frac = 1;
+            else next_work_frac = work_frac_digits;
 
-            // Direction control for CAP
             if (dir_effective == "down") {
-                // want t_next = t - cap  => safe_jump = +cap
-                arb_set(safe_jump, cap_arb);
+                arb_set(safe_jump, cap_arb);      // t_next = t - cap
             } else if (dir_effective == "up") {
-                // want t_next = t + cap  => safe_jump = -cap
-                arb_neg(safe_jump, cap_arb);
+                arb_neg(safe_jump, cap_arb);      // t_next = t + cap
             } else {
-                // auto: compare energy at +/- cap
                 arb_t e_cap_plus, e_cap_minus;
                 arb_init(e_cap_plus);
                 arb_init(e_cap_minus);
@@ -429,194 +614,153 @@ int main(int argc, char **argv) {
 
                 ctx.compute(t_cap_plus, sigma);
                 arb_set(e_cap_plus, ctx.abs_z);
-
                 ctx.compute(t_cap_minus, sigma);
                 arb_set(e_cap_minus, ctx.abs_z);
 
                 if (arb_lt(e_cap_plus, e_cap_minus)) {
-                    // choose t_next = t + cap => safe_jump = -cap
-                    arb_neg(safe_jump, cap_arb);
+                    arb_neg(safe_jump, cap_arb); // move up
                 } else {
-                    // choose t_next = t - cap => safe_jump = +cap
-                    arb_set(safe_jump, cap_arb);
+                    arb_set(safe_jump, cap_arb); // move down
                 }
 
                 arb_clear(e_cap_plus);
                 arb_clear(e_cap_minus);
             }
-
-            // On integer CAP, ensure at least 1 fractional digit is tracked going forward.
-            if (work_frac_digits == 0) {
-                next_work_frac = 1;
-            } else {
-                // CAP does not automatically increase precision; keep as-is.
-                next_work_frac = work_frac_digits;
-            }
         } else {
-            status = "[FIT]";
-
-            // Default Newton FIT jump
-            arb_set(safe_jump, raw_jump);
             next_work_frac = target_frac;
+            arb_set(safe_jump, raw_jump);
 
-            // Before lock, force user direction for FIT as well (guarantees monotone down/up).
             if (!lock_found) {
                 if (dir_effective == "down") {
-                    // safe_jump = +|raw_jump|
-                    arb_abs(safe_jump, raw_jump);
+                    arb_abs(safe_jump, raw_jump);      // t decreases
                 } else if (dir_effective == "up") {
-                    // safe_jump = -|raw_jump|
                     arb_abs(safe_jump, raw_jump);
-                    arb_neg(safe_jump, safe_jump);
-                } else {
-                    // auto: keep Newton sign
-                }
-            }
-
-            // --- FIT SHORTCUT LOGIC ---
-            // If the FIT jump magnitude implies much deeper decimal addressability than the
-            // planned next_work_frac, allow it (still a FIT, still within cap criteria).
-            //
-            // We infer implied fractional digits from scientific exponent of jump midpoint:
-            //   |jump| ~= m * 10^(exp10)
-            // If exp10 is negative, it suggests the jump "touches" around -exp10 decimals.
-            {
-                arb_t abs_jump;
-                arb_init(abs_jump);
-                arb_abs(abs_jump, safe_jump);
-
-                // Use a small sig digit count; we only need the exponent.
-                std::string aj = arb_mid_to_string_sig(abs_jump, 20);
-                arb_clear(abs_jump);
-
-                long long exp10 = 0;
-                if (parse_exp10_from_sci(aj, exp10)) {
-                    if (exp10 < 0) {
-                        long long implied = -exp10;
-                        if (implied > (long long)next_work_frac) {
-                            if (implied > (long long)internal_max_frac) implied = (long long)internal_max_frac;
-                            next_work_frac = (int)implied;
-                            status = "[FIT*]";
-                        }
-                    }
+                    arb_neg(safe_jump, safe_jump);     // t increases
                 }
             }
         }
 
-        // Apply step: t_next = t_work - safe_jump
-        ctx.arb_set_decimal_safe(t_work_arb, t_work);
-        arb_sub(t_next_arb, t_work_arb, safe_jump, prec_bits);
-
-        // Convert next arb midpoint to Decimal at INTERNAL working precision (next_work_frac),
-        // NOT at args.depth. This is the critical separation.
-        {
-            int int_digits_now = count_int_digits(t_work);
-
-            // guard digits: tie to max_step (matches your earlier dps/guard reasoning).
-            // We keep this policy even with shortcut; shortcut precision is bounded by internal_max_frac.
-            int sig_hint = int_digits_now + next_work_frac + args.max_step;
-
-            t_work = arb_mid_to_decimal_strict_trunc(t_next_arb, next_work_frac, sig_hint);
+        // If this iteration will hit depth (or beyond), cache FULL slope(mid) in Decimal
+        // at exactly args.depth decimals (fixed, no rounding).
+        if (next_work_frac >= args.depth) {
+            final_slope_mid_dec = arb_mid_to_decimal_exact_trunc(slope, args.depth);
+            have_final_slope = true;
         }
 
-        // Output: address is shown at min(next_work_frac, args.depth) for readability.
+        // ---- APPLY UPDATE IN DECIMAL SPACE ----
+        Decimal t_next_dec = t_work;
+
+        if (is_cap) {
+            if (arb_is_negative(safe_jump)) {
+                t_next_dec = t_work + cap_dec;
+            } else {
+                t_next_dec = t_work - cap_dec;
+            }
+        } else {
+            // Convert safe_jump EXACTLY via mantissa+2exp (no strings),
+            // then truncate the jump (never round) before applying.
+            int jump_trunc_decimals = next_work_frac + 256;
+            Decimal jump_dec = arb_mid_to_decimal_exact_trunc(safe_jump, jump_trunc_decimals);
+
+            t_next_dec = t_work - jump_dec;
+        }
+
+        if (next_work_frac > internal_max_frac) next_work_frac = internal_max_frac;
+        t_work = strict_truncate_toward0(t_next_dec, next_work_frac);
+
         int display_decimals = next_work_frac;
         if (display_decimals > args.depth) display_decimals = args.depth;
 
         std::string t_addr_print = fixed_trunc_str_decimal_exact(t_work, display_decimals);
 
-        // Keep slope/jump prints stable; slope shown with 50 sig digits for run display.
+        // DISPLAY ONLY (keep short)
         std::string slope_mid = arb_mid_to_string_sig(slope, 50);
         std::string jump_mid  = arb_mid_to_string_sig(safe_jump, 20);
 
+        // Compute energy at updated t_work, and also ratio/drop vs previous e_now
         ctx.compute(t_work, sigma);
+        arb_set(e_after, ctx.abs_z);
         std::string e_print = ctx.get_energy_str(45);
 
-        // Step column prints the planned "velocity" step (effective step schedule),
-        // not the shortcut-implied digits. Shortcut is indicated via Status [FIT*].
+        // ratio = E_next / E_now; drop% = (1 - ratio) * 100
+        if (arb_is_zero(e_now)) {
+            arb_zero(e_ratio);
+            arb_zero(e_drop_pct);
+        } else {
+            arb_div(e_ratio, e_after, e_now, prec_bits);
+            arb_sub(tmp_arb, one_arb, e_ratio, prec_bits);
+            arb_mul(e_drop_pct, tmp_arb, hundred_arb, prec_bits);
+        }
+
+        // Cache "final" ratio/drop for wrap-up (fixed Decimal, no rounding).
+        final_energy_ratio_dec = arb_mid_to_decimal_exact_trunc(e_ratio, args.depth);
+        final_energy_drop_pct_dec = arb_mid_to_decimal_exact_trunc(e_drop_pct, args.depth);
+        have_final_energy_ratio = true;
+
+        // DISPLAY ONLY (keep short)
+        std::string ratio_mid = arb_mid_to_string_sig(e_ratio, 18);
+        std::string drop_mid  = arb_mid_to_string_sig(e_drop_pct, 18);
+
         std::cout << std::left
                   << std::setw(4)  << work_frac_digits << " | "
                   << std::setw(6)  << step_size_eff << " | "
                   << std::setw(6)  << grow_mode << " | "
                   << std::setw(8)  << status << " | "
                   << std::setw(28) << slope_mid << " | "
-                  << std::setw(28) << jump_mid << " | "
+                  << std::setw(28) << jump_mid  << " | "
+                  << std::setw(18) << ratio_mid << " | "
+                  << std::setw(18) << drop_mid  << " | "
                   << t_addr_print << " | "
                   << e_print
                   << "\n";
 
-        // Update fractional digit tracking state
         work_frac_digits = next_work_frac;
 
-        // --- YOUR DEPTH TERMINATION RULE (exactly as requested) ---
-        // After jump, if fractional digits tracked >= depth:
-        //   - if == depth: energy at t_work (already computed) and finish
-        //   - if  > depth: truncate to depth (no rounding), compute energy at truncated, finish
+        // Termination: jump then truncate to depth, stop.
         if (work_frac_digits >= args.depth) {
-            Decimal t_final;
-            if (work_frac_digits == args.depth) {
-                t_final = t_work;
-            } else {
+            Decimal t_final = t_work;
+            if (work_frac_digits > args.depth) {
                 t_final = strict_truncate_toward0(t_work, args.depth);
             }
 
-            // Keep your existing final energy evaluation.
             ctx.compute(t_final, sigma);
-
-            // --- FINAL SLOPE (qualified; NOT the 50-sig per-row display) ---
-            // Compute slope at t_final using a depth-tied probe: h = 10^-(depth+5),
-            // clamped to internal_max_frac.
-            int final_probe_depth = args.depth + 5;
-            if (final_probe_depth > internal_max_frac) final_probe_depth = internal_max_frac;
-            if (final_probe_depth < 1) final_probe_depth = 1;
-
-            Decimal h_final_dec(1, pow10_z(final_probe_depth));
-
-            arb_t e0f, e1f, difff, hf, slope_final;
-            arb_init(e0f);
-            arb_init(e1f);
-            arb_init(difff);
-            arb_init(hf);
-            arb_init(slope_final);
-
-            ctx.arb_set_decimal_safe(hf, h_final_dec);
-
-            // e0 = E(t_final)
-            ctx.compute(t_final, sigma);
-            arb_set(e0f, ctx.abs_z);
-
-            // e1 = E(t_final + h)
-            Decimal t_final_plus = t_final + h_final_dec;
-            ctx.compute(t_final_plus, sigma);
-            arb_set(e1f, ctx.abs_z);
-
-            // slope_final = (e1 - e0) / h
-            arb_sub(difff, e1f, e0f, prec_bits);
-            if (arb_is_zero(difff)) {
-                arb_set_str(slope_final, "1e-300", prec_bits);
-            } else {
-                arb_div(slope_final, difff, hf, prec_bits);
-            }
-
-            // Print size for final slope (qualified)
-            // Policy: use max(80, depth/2) sig digits, capped by compute_dps.
-            int final_slope_sig = args.depth / 2;
-            if (final_slope_sig < 80) final_slope_sig = 80;
-            if (final_slope_sig > compute_dps) final_slope_sig = compute_dps;
+            // ctx.abs_z now holds FINAL SINK ENERGY (as arb_t) at t_final.
 
             std::cout << ">>> REACHED TARGET DEPTH (SETTLED) <<<\n";
             std::cout << std::string(220, '-') << "\n";
-            std::cout << "FINAL SINK ENERGY: " << ctx.get_energy_str(150) << "\n";
-            std::cout << "FINAL T VALUE:     " << fixed_trunc_str_decimal_exact(t_final, args.depth) << "\n";
-            std::cout << "FINAL_SLOPE(mid):  " << arb_mid_to_string_sig(slope_final, final_slope_sig) << "\n";
-            std::cout << "FINAL_SLOPE_SIG:   " << final_slope_sig << "\n";
-            std::cout << "FINAL_PROBE_H:     1e-" << final_probe_depth << "\n";
 
-            arb_clear(e0f);
-            arb_clear(e1f);
-            arb_clear(difff);
-            arb_clear(hf);
-            arb_clear(slope_final);
+            // Scientific readout (mid +/- rad) immediately above fixed decimal, per your request.
+            print_arb_bracket("FINAL SINK ENERGY (SCI, MID+/-RAD)", ctx.abs_z, 50);
+
+            // FIX #1: FINAL SINK ENERGY should not display as 0 due solely to args.depth truncation.
+            // DISPLAY ONLY: adaptive fixed decimal (no scientific notation), then trim trailing zeros.
+            std::string final_energy_fixed = arb_mid_to_fixed_decimal_adaptive_trim(ctx.abs_z, 120, args.depth + 256);
+            std::cout << "FINAL SINK ENERGY (MID, FIXED): " << final_energy_fixed << "\n";
+
+            // Keep strict fixed-width for t_final (your paste discipline)
+            std::cout << "FINAL T VALUE:     " << fixed_trunc_str_decimal_exact(t_final, args.depth) << "\n";
+
+            // full slope(mid) at full fixed decimal precision (args.depth decimals), no rounding.
+            if (!have_final_slope) {
+                final_slope_mid_dec = arb_mid_to_decimal_exact_trunc(slope, args.depth);
+                have_final_slope = true;
+            }
+            std::cout << "FINAL_SLOPE(mid):  " << fixed_trunc_str_decimal_exact(final_slope_mid_dec, args.depth) << "\n";
+
+            // FIX #2: trim trailing zeros for final ratio/drop (DISPLAY ONLY).
+            if (!have_final_energy_ratio) {
+                final_energy_ratio_dec = arb_mid_to_decimal_exact_trunc(e_ratio, args.depth);
+                final_energy_drop_pct_dec = arb_mid_to_decimal_exact_trunc(e_drop_pct, args.depth);
+                have_final_energy_ratio = true;
+            }
+
+            std::string ratio_out = fixed_trunc_str_decimal_exact(final_energy_ratio_dec, args.depth);
+            std::string drop_out  = fixed_trunc_str_decimal_exact(final_energy_drop_pct_dec, args.depth);
+            ratio_out = trim_trailing_zeros_fixed(ratio_out);
+            drop_out  = trim_trailing_zeros_fixed(drop_out);
+
+            std::cout << "FINAL_ENERGY_RATIO:    " << ratio_out << "\n";
+            std::cout << "FINAL_ENERGY_DROP_PCT: " << drop_out << "\n";
 
             arb_clear(e_now);
             arb_clear(e_plus);
@@ -627,18 +771,53 @@ int main(int argc, char **argv) {
             arb_clear(h_arb);
             arb_clear(cap_arb);
             arb_clear(safe_jump);
-            arb_clear(t_work_arb);
-            arb_clear(t_next_arb);
+
+            arb_clear(e_after);
+            arb_clear(e_ratio);
+            arb_clear(e_drop_pct);
+            arb_clear(one_arb);
+            arb_clear(hundred_arb);
+            arb_clear(tmp_arb);
 
             return 0;
         }
     }
 
-    // If we fall out (max_steps) without reaching depth, report best we have.
     std::cout << std::string(220, '-') << "\n";
+
+    // ---------------------------------------------------------
+    // FORCE RAW OUTPUT (The "Unsafe" Read)
+    // ---------------------------------------------------------
     ctx.compute(t_work, sigma);
-    std::cout << "FINAL SINK ENERGY: " << ctx.get_energy_str(150) << "\n";
-    std::cout << "FINAL T VALUE:     " << fixed_trunc_str_decimal_exact(t_work, work_frac_digits) << "\n";
+
+    // RAW: might be scientific; this is your unsafe read. Keep it as-is, but also provide fixed adaptive.
+    std::string raw_energy = arb_mid_to_string_sig(ctx.abs_z, 3000);
+
+    // Also provide a fixed adaptive version (DISPLAY ONLY) for readability and to avoid "0" artifacts.
+    std::string raw_energy_fixed = arb_mid_to_fixed_decimal_adaptive_trim(ctx.abs_z, 120, args.depth);
+
+    std::cout << "FINAL SINK ENERGY (RAW):       " << raw_energy << "\n";
+    std::cout << "FINAL SINK ENERGY (RAW,FIXED): " << raw_energy_fixed << "\n";
+    std::cout << "FINAL T VALUE:                 " << fixed_trunc_str_decimal_exact(t_work, work_frac_digits) << "\n";
+
+    // Also print slope at whatever depth we ended with (strict fixed).
+    Decimal end_slope_dec = arb_mid_to_decimal_exact_trunc(slope, work_frac_digits);
+    std::cout << "FINAL_SLOPE(mid):              " << fixed_trunc_str_decimal_exact(end_slope_dec, work_frac_digits) << "\n";
+
+    // Also print energy ratio/drop at whatever depth we ended with (fixed to depth here), trimmed.
+    if (!have_final_energy_ratio) {
+        final_energy_ratio_dec = arb_mid_to_decimal_exact_trunc(e_ratio, args.depth);
+        final_energy_drop_pct_dec = arb_mid_to_decimal_exact_trunc(e_drop_pct, args.depth);
+        have_final_energy_ratio = true;
+    }
+
+    std::string ratio_out = fixed_trunc_str_decimal_exact(final_energy_ratio_dec, args.depth);
+    std::string drop_out  = fixed_trunc_str_decimal_exact(final_energy_drop_pct_dec, args.depth);
+    ratio_out = trim_trailing_zeros_fixed(ratio_out);
+    drop_out  = trim_trailing_zeros_fixed(drop_out);
+
+    std::cout << "FINAL_ENERGY_RATIO:            " << ratio_out << "\n";
+    std::cout << "FINAL_ENERGY_DROP_PCT:         " << drop_out << "\n";
 
     arb_clear(e_now);
     arb_clear(e_plus);
@@ -649,8 +828,13 @@ int main(int argc, char **argv) {
     arb_clear(h_arb);
     arb_clear(cap_arb);
     arb_clear(safe_jump);
-    arb_clear(t_work_arb);
-    arb_clear(t_next_arb);
+
+    arb_clear(e_after);
+    arb_clear(e_ratio);
+    arb_clear(e_drop_pct);
+    arb_clear(one_arb);
+    arb_clear(hundred_arb);
+    arb_clear(tmp_arb);
 
     return 0;
 }

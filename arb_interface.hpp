@@ -72,6 +72,7 @@ struct ArbZetaContext {
         const arf_struct *mid = arb_midref(abs_z);
         return arf_get_d(mid, ARF_RND_NEAR);
     }
+
 };
 
 #endif // ARB_INTERFACE_HPP

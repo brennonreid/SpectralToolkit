@@ -224,4 +224,6 @@ inline std::vector<Decimal> frange_decimal(const Decimal &start,
     return v;
 }
 
+
+
 #endif // DECIMAL_HPP

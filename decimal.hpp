@@ -15,13 +15,36 @@ using Decimal = mpq_class;
 // 10^n as big integer
 inline mpz_class pow10_z(long n)
 {
-    mpz_class r = 1;
+    // Preserve original semantics
     if (n == 0) return 1;
-    if (n < 0) return 0; 
+    if (n < 0) return 0;
 
-    // Use efficient GMP pow_ui
-    mpz_ui_pow_ui(r.get_mpz_t(), 10, static_cast<unsigned long>(n));
-    return r;
+    // Cache powers of 10 to avoid repeated mpz_ui_pow_ui allocation/work.
+    // This is a pure performance optimization: exact same value returned.
+    static std::vector<mpz_class> cache;
+    static bool inited = false;
+
+    if (!inited) {
+        cache.reserve(1024);
+        cache.push_back(mpz_class(1)); // 10^0
+        inited = true;
+    }
+
+    // If already cached, return immediately.
+    if (n < (long)cache.size()) {
+        return cache[(size_t)n];
+    }
+
+    // Grow cache up to n using incremental multiply-by-10.
+    // This turns many repeated pow(10,n) calls into O(1) lookups after first build.
+    size_t old_sz = cache.size();
+    cache.resize((size_t)n + 1);
+
+    for (size_t k = old_sz; k < cache.size(); ++k) {
+        cache[k] = cache[k - 1] * 10;
+    }
+
+    return cache[(size_t)n];
 }
 
 // Trim whitespace
@@ -65,13 +88,13 @@ inline Decimal decimal_from_simple_string(const std::string &s)
 
     // Strip non-digits (safeguard)
     auto strip = [](std::string &t) {
-        t.erase(std::remove_if(t.begin(), t.end(), 
+        t.erase(std::remove_if(t.begin(), t.end(),
             [](unsigned char c){ return !isdigit(c); }), t.end());
     };
 
     strip(int_part);
     strip(frac_part);
-    
+
     if (int_part.empty()) int_part = "0";
 
     // FIX: Force Base 10 to prevent Octal detection on leading zeros
@@ -110,14 +133,14 @@ inline Decimal decimal_from_string(const std::string &s_in)
     std::string exp_str = s.substr(e_pos + 1);
 
     Decimal base = decimal_from_simple_string(base_str);
-    
+
     if (exp_str.empty()) return base;
 
     long exp_val = 0;
     try {
         exp_val = std::stol(exp_str);
     } catch (...) {
-        return base; 
+        return base;
     }
 
     if (exp_val == 0) return base;
@@ -136,16 +159,16 @@ inline Decimal truncate_decimal(const Decimal &x, int digits)
 {
     mpz_class scale;
     if (digits >= 0) scale = pow10_z(digits);
-    else return Decimal(0); 
+    else return Decimal(0);
 
     Decimal y = x * Decimal(scale);
-    
+
     mpz_class n = y.get_num();
     mpz_class d = y.get_den();
     mpz_class q;
 
     if (n >= 0) q = n / d;
-    else q = -((-n + d - 1) / d); 
+    else q = -((-n + d - 1) / d);
 
     return Decimal(q, scale);
 }
@@ -188,10 +211,10 @@ inline int count_decimals_str(const std::string &s_in)
     std::string s = trim(s_in);
     std::size_t dot = s.find('.');
     if (dot == std::string::npos) return 0;
-    
+
     std::size_t e_pos = s.find('e');
     if (e_pos == std::string::npos) e_pos = s.find('E');
-    
+
     std::string frac;
     if (e_pos == std::string::npos) {
         frac = s.substr(dot + 1);
@@ -214,7 +237,7 @@ inline std::vector<Decimal> frange_decimal(const Decimal &start,
     if (step <= Decimal(0)) return v;
     Decimal x = start;
     int safety = 0;
-    const int MAX_STEPS = 1000000; 
+    const int MAX_STEPS = 1000000;
 
     while (x <= end && safety < MAX_STEPS) {
         v.push_back(x);
@@ -223,7 +246,5 @@ inline std::vector<Decimal> frange_decimal(const Decimal &start,
     }
     return v;
 }
-
-
 
 #endif // DECIMAL_HPP

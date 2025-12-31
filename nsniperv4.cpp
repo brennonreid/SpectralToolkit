@@ -1,43 +1,28 @@
-// nsniperv3.cpp
+// nsniperv4.cpp
 //
-// Closure-stable Johansson-digit matching version (diagnostics stripped).
+// Minimal, exact-landing v4:
 //
-// Your request (implemented):
-// - REMOVE the extra zeta call per step that is only used for diagnostics/progress.
-//   Specifically, we NO LONGER do ctx.compute(t_work) AFTER updating t_work on each step.
-//   Per iteration we now do ONLY:
-//     1) E_now   = |zeta(0.5 + i*t_work)|
-//     2) E_plus  = |zeta(0.5 + i*(t_work + h))|
-//   These two are required to compute slope and jump.
+// - NO energy caching.
+// - NO secant slope.
+// - Keeps probe sizing logic unchanged.
+// - Keeps CAP logic unchanged.
+// - Adds "exact landing" step scheduling: doubling regime, but clamps the effective step
+//   so we never overshoot args.depth.
 //
-// - Any other expensive calls used only for diagnostics were removed:
-//     * No per-step ctx.compute(t_next) for progress energy
-//     * No per-step ratio/drop computation
-//   (Final ratio/drop is still produced, using the final sink energy vs the last pre-step energy.)
+// Output files:
+//   --out <path>        : main log file (final results + key run metadata)
+//   --out_steps <path>  : per-step trace file (one line per step)
+//   --out_t <path>      : ONLY final T value (raw digits, one line)
 //
-// - Still show a simple per-step progress line (cheap):
-//     * prints one short line per step
-//     * uses magnitude estimate of PRE-UPDATE energy E_now (already computed)
-//     * uses magnitude estimate of jump (already computed)
-//     * prints slope sign only
-//     * prints frac after update (next_work_frac) so you see digit growth
+// Defaults:
+//   --out        defaults to "nsniperv4_output.txt"
+//   --out_steps  defaults to "<out>.steps.txt"
+//   --out_t      defaults to "<out>.t.txt"
 //
-// - Final report remains full true output:
-//     * FINAL sink energy [mid +/- rad] at final t
-//     * FINAL sink energy fixed adaptive
-//     * FINAL T VALUE strict fixed-width at args.depth decimals (truncate only)
-//     * FINAL_SLOPE(mid) strict fixed-width at args.depth decimals (truncate only)
-//     * FINAL_ENERGY_RATIO / FINAL_ENERGY_DROP_PCT computed from final sink energy vs last pre-step energy
-//
-// NEW (your latest request):
-// - CAP logic remains unchanged.
-// - When CAP happens, set a flag "safety_after_cap".
-// - From that point forward (for this run / sink), if decimals permit, reduce FIT digit growth by 1
-//   additional digit: step_size_eff = step_size_capped - 2 (instead of -1), clamped to >= 1.
-//   This makes jumps slightly less aggressive after the first CAP.
+// Hard-fail if any output file cannot be opened.
 //
 // Build:
-//   g++ -O2 -std=c++17 nsniperv3.cpp -lflint -lgmp -lmpfr -o nsniperv3
+//   g++ -O2 -std=c++17 nsniperv4.cpp -lflint -lgmp -lmpfr -o nsniperv4
 
 #include <iostream>
 #include <string>
@@ -46,6 +31,9 @@
 #include <cctype>
 #include <cstdio>
 #include <climits>
+#include <chrono>
+#include <cstdint>
+#include <unordered_map>
 
 #include "decimal.hpp"
 #include "arb_interface.hpp"
@@ -54,11 +42,29 @@
 #include <flint/fmpz.h>
 
 // -----------------------------
+// pow10 cache (mpz) - HOT
+// -----------------------------
+struct Pow10Cache {
+    std::unordered_map<int, mpz_class> cache;
+
+    const mpz_class& get(int n) {
+        if (n < 0) {
+            std::cerr << "ERROR: pow10 exponent must be >= 0\n";
+            std::exit(1);
+        }
+        auto it = cache.find(n);
+        if (it != cache.end()) return it->second;
+
+        mpz_class v = pow10_z(n);
+        auto res = cache.emplace(n, v);
+        return res.first->second;
+    }
+};
+
+// -----------------------------
 // Helpers (state-safe)
 // -----------------------------
-
-// strict_truncate(val, decimals): truncates toward 0, never rounds.
-static Decimal strict_truncate_toward0(const Decimal &x, int decimals) {
+static Decimal strict_truncate_toward0_cached(const Decimal &x, int decimals, Pow10Cache& p10) {
     if (decimals < 0) {
         std::cerr << "ERROR: decimals must be >= 0\n";
         std::exit(1);
@@ -73,7 +79,7 @@ static Decimal strict_truncate_toward0(const Decimal &x, int decimals) {
         return Decimal(-fl);
     }
 
-    mpz_class scale = pow10_z(decimals);
+    const mpz_class& scale = p10.get(decimals);
     Decimal y = x * Decimal(scale);
 
     mpz_class n = y.get_num();
@@ -91,8 +97,11 @@ static Decimal strict_truncate_toward0(const Decimal &x, int decimals) {
     return Decimal(q, scale);
 }
 
-// fixed-point string with exactly `decimals` digits (no rounding).
-static std::string fixed_trunc_str_decimal_exact(const Decimal &val, int decimals) {
+static inline Decimal t_can_cached(const Decimal &t, int frac_digits, Pow10Cache& p10) {
+    return strict_truncate_toward0_cached(t, frac_digits, p10);
+}
+
+static std::string fixed_trunc_str_decimal_exact_cached(const Decimal &val, int decimals, Pow10Cache& p10) {
     if (decimals < 0) {
         std::cerr << "ERROR: decimals must be >= 0\n";
         std::exit(1);
@@ -103,16 +112,15 @@ static std::string fixed_trunc_str_decimal_exact(const Decimal &val, int decimal
     if (neg) x = -x;
 
     if (decimals == 0) {
-        Decimal t = strict_truncate_toward0(x, 0);
+        Decimal t = strict_truncate_toward0_cached(x, 0, p10);
         std::string s = decimal_to_string(t, 0);
         if (neg && s != "0") return "-" + s;
         return s;
     }
 
-    mpz_class scale = pow10_z(decimals);
+    const mpz_class& scale = p10.get(decimals);
 
-    // scaled_int = trunc(x * scale)
-    Decimal scaled = strict_truncate_toward0(x * Decimal(scale), 0);
+    Decimal scaled = strict_truncate_toward0_cached(x * Decimal(scale), 0, p10);
     mpz_class scaled_int = scaled.get_num() / scaled.get_den();
 
     mpz_class int_part = scaled_int / scale;
@@ -129,7 +137,6 @@ static std::string fixed_trunc_str_decimal_exact(const Decimal &val, int decimal
     return out;
 }
 
-// Convert decimal digits to Arb bits precision.
 static slong dps_to_bits(int dps) {
     long double bits = (long double)dps * 3.32192809488736234787L;
     bits += 64.0L;
@@ -137,9 +144,13 @@ static slong dps_to_bits(int dps) {
     return (slong)bits;
 }
 
-// Count integer digits (no sign) of current Decimal.
-static int count_int_digits(const Decimal &x) {
-    Decimal t_int = strict_truncate_toward0(x, 0);
+static slong clamp_step_bits(slong b) {
+    if (b < 256) b = 256;
+    return b;
+}
+
+static int count_int_digits_cached(const Decimal &x, Pow10Cache& p10) {
+    Decimal t_int = strict_truncate_toward0_cached(x, 0, p10);
     std::string is = decimal_to_string(t_int, 0);
     if (!is.empty() && is[0] == '-') is.erase(0, 1);
     int d = (int)is.size();
@@ -147,8 +158,7 @@ static int count_int_digits(const Decimal &x) {
     return d;
 }
 
-// Convert arf exactly via mantissa * 2^exp2, then strict-truncate toward 0 to `decimals`.
-static Decimal arf_mid_to_decimal_exact_trunc_pow10(const arf_struct *mid, int decimals) {
+static Decimal arf_mid_to_decimal_exact_trunc_pow10_cached(const arf_struct *mid, int decimals, Pow10Cache& p10) {
     if (decimals < 0) {
         std::cerr << "ERROR: decimals must be >= 0\n";
         std::exit(1);
@@ -180,19 +190,17 @@ static Decimal arf_mid_to_decimal_exact_trunc_pow10(const arf_struct *mid, int d
         r = Decimal(m_mpz, two_pow);
     }
 
-    return strict_truncate_toward0(r, decimals);
+    return strict_truncate_toward0_cached(r, decimals, p10);
 }
 
-static Decimal arb_mid_to_decimal_exact_trunc(const arb_t x, int decimals) {
+static Decimal arb_mid_to_decimal_exact_trunc_cached(const arb_t x, int decimals, Pow10Cache& p10) {
     const arf_struct *mid = arb_midref(x);
-    return arf_mid_to_decimal_exact_trunc_pow10(mid, decimals);
+    return arf_mid_to_decimal_exact_trunc_pow10_cached(mid, decimals, p10);
 }
 
 // -----------------------------
 // DISPLAY helpers (final-report only)
 // -----------------------------
-
-// Trim trailing zeros after decimal point; remove '.' if it becomes the last char.
 static std::string trim_trailing_zeros_fixed(std::string s) {
     if (s.find('e') != std::string::npos || s.find('E') != std::string::npos) return s;
 
@@ -206,8 +214,6 @@ static std::string trim_trailing_zeros_fixed(std::string s) {
     return s;
 }
 
-// Convert scientific string like "-3.82e-40" to fixed decimal (no exponent).
-// DISPLAY ONLY (arf_get_str rounds). If max_decimals >= 0, truncate to at most that many.
 static std::string sci_to_fixed_noexp_trunc(const std::string &sci, int max_decimals) {
     std::string s = sci;
     if (s == "0" || s == "+0" || s == "-0") return "0";
@@ -271,21 +277,23 @@ static std::string sci_to_fixed_noexp_trunc(const std::string &sci, int max_deci
     return out;
 }
 
-// Prints: LABEL: [mid +/- rad]
 static void print_arb_bracket(const char* label, const arb_t x, slong digits) {
     std::cout << label << ": ";
     arb_printn(x, digits, 0);
     std::cout << "\n";
 }
 
-// Arb midpoint -> fixed decimal, adaptive enough to avoid printing as 0.
-// DISPLAY ONLY.
+static void fprint_arb_bracket(FILE* f, const char* label, const arb_t x, slong digits) {
+    std::fprintf(f, "%s: ", label);
+    arb_fprintn(f, x, digits, 0);
+    std::fprintf(f, "\n");
+}
+
 static std::string arb_mid_to_fixed_decimal_adaptive_trim(const arb_t x, int sig_digits, int max_decimals) {
     const arf_struct *mid = arb_midref(x);
 
     if (arf_is_zero(mid)) return "0";
 
-    // Attempt render
     {
         char *cstr = arf_get_str(mid, sig_digits);
         if (!cstr) {
@@ -301,33 +309,7 @@ static std::string arb_mid_to_fixed_decimal_adaptive_trim(const arb_t x, int sig
         if (fixed != "0") return fixed;
     }
 
-    // Estimate exponent, allow more decimals
-    fmpz_t m_f;
-    fmpz_init(m_f);
-    slong e2 = 0;
-    arf_get_fmpz_2exp(m_f, &e2, mid);
-
-    slong m_bits = fmpz_bits(m_f);
-    if (m_bits < 1) m_bits = 1;
-
-    const long double LOG10_2 = 0.30102999566398119521L;
-    long double log10_m_lo = (long double)(m_bits - 1) * LOG10_2;
-    long double log10_mid  = log10_m_lo + (long double)e2 * LOG10_2;
-
-    long long exp10 = (long long)(log10_mid >= 0 ? (long long)log10_mid : (long long)(log10_mid - 1.0L));
-    long long needed_decimals = 0;
-    if (exp10 < 0) needed_decimals = (-exp10) + 8;
-
-    fmpz_clear(m_f);
-
-    long long use_decimals_ll = (long long)max_decimals;
-    if (needed_decimals > use_decimals_ll) use_decimals_ll = needed_decimals;
-
-    const long long HARD_CAP = (long long)max_decimals + 1000;
-    if (use_decimals_ll > HARD_CAP) use_decimals_ll = HARD_CAP;
-
-    int use_decimals = (use_decimals_ll < 0) ? 0 : (int)use_decimals_ll;
-
+    // fallback
     char *c2 = arf_get_str(mid, sig_digits * 2);
     if (!c2) {
         std::cerr << "ERROR: arf_get_str failed\n";
@@ -336,7 +318,7 @@ static std::string arb_mid_to_fixed_decimal_adaptive_trim(const arb_t x, int sig
     std::string sci2(c2);
     flint_free(c2);
 
-    std::string fixed2 = sci_to_fixed_noexp_trunc(sci2, use_decimals);
+    std::string fixed2 = sci_to_fixed_noexp_trunc(sci2, max_decimals);
     fixed2 = trim_trailing_zeros_fixed(fixed2);
 
     if (fixed2 == "0") return sci2;
@@ -346,8 +328,6 @@ static std::string arb_mid_to_fixed_decimal_adaptive_trim(const arb_t x, int sig
 // -----------------------------
 // Hot-loop progress helpers (NO decimal expansion / no extra zeta calls)
 // -----------------------------
-
-// Approx floor(log10(|mid|)) using (bitlen(m)-1 + e2) * log10(2).
 static long long approx_floor_log10_abs_arf_mid(const arf_struct *mid) {
     if (arf_is_zero(mid)) return LLONG_MIN;
 
@@ -384,7 +364,7 @@ static const char* dir_short(const std::string& dir_effective) {
     return "A";
 }
 
-// One short line per step. Energy token is PRE-UPDATE energy (E_now), already computed.
+// One short line per step (stdout).
 static void print_step_line(
     int step_idx,
     int frac_after_update,
@@ -423,6 +403,46 @@ static void print_step_line(
     std::fwrite(buf, 1, (size_t)n, stdout);
 }
 
+// Same line, but to file (steps log).
+static void fprint_step_line(
+    FILE* f,
+    int step_idx,
+    int frac_after_update,
+    int step_size_eff,
+    int probe_depth,
+    bool is_cap,
+    const std::string& dir_effective,
+    const arb_t e_now,
+    const arb_t safe_jump,
+    const arb_t slope
+) {
+    char buf[256];
+
+    const char *mode = is_cap ? "CAP" : "FIT";
+    const char *dch  = dir_short(dir_effective);
+
+    long long logE = approx_floor_log10_abs_arb_mid(e_now);
+    long long logJ = approx_floor_log10_abs_arb_mid(safe_jump);
+    char sgn = slope_sign_char(slope);
+
+    char eTok[32], jTok[32];
+    if (logE == LLONG_MIN) std::snprintf(eTok, sizeof(eTok), "0");
+    else std::snprintf(eTok, sizeof(eTok), "1e%lld", logE);
+
+    if (logJ == LLONG_MIN) std::snprintf(jTok, sizeof(jTok), "0");
+    else std::snprintf(jTok, sizeof(jTok), "1e%lld", logJ);
+
+    int n = std::snprintf(
+        buf, sizeof(buf),
+        "%4d frac=%-6d step=%-5d probe=%-5d %-3s dir=%s  E(pre)~%-10s  J~%-10s  S=%c\n",
+        step_idx, frac_after_update, step_size_eff, probe_depth, mode, dch, eTok, jTok, sgn
+    );
+    if (n < 0) return;
+    if ((size_t)n >= sizeof(buf)) n = (int)sizeof(buf) - 1;
+
+    std::fwrite(buf, 1, (size_t)n, f);
+}
+
 // -----------------------------
 // CLI
 // -----------------------------
@@ -434,6 +454,18 @@ struct Args {
     int max_step = 25;
     std::string dir = "auto";
     bool quiet = false;
+
+    // kept for compatibility but unused in this minimal build:
+    bool profile = false;
+    int profile_every = 1;
+    int secant_min_frac = 6;
+    int secant_stable_needed = 2;
+    int secant_lock_prefix = 60;
+
+    // Output files
+    std::string out_path = "nsniperv4_output.txt";
+    std::string out_steps_path = "";
+    std::string out_t_path = "";
 };
 
 static Args parse_args(int argc, char **argv) {
@@ -484,6 +516,47 @@ static Args parse_args(int argc, char **argv) {
             }
         } else if (k == "--quiet") {
             a.quiet = true;
+        } else if (k == "--profile") {
+            // ignored (compat)
+            a.profile = true;
+        } else if (k == "--profile_every") {
+            require_value(k);
+            a.profile_every = std::stoi(argv[++i]);
+            if (a.profile_every < 1) a.profile_every = 1;
+        } else if (k == "--secant_min_frac") {
+            require_value(k);
+            a.secant_min_frac = std::stoi(argv[++i]);
+            if (a.secant_min_frac < 0) a.secant_min_frac = 0;
+        } else if (k == "--secant_stable") {
+            require_value(k);
+            a.secant_stable_needed = std::stoi(argv[++i]);
+            if (a.secant_stable_needed < 0) a.secant_stable_needed = 0;
+        } else if (k == "--secant_lock_prefix") {
+            require_value(k);
+            a.secant_lock_prefix = std::stoi(argv[++i]);
+            if (a.secant_lock_prefix < 1) a.secant_lock_prefix = 1;
+            if (a.secant_lock_prefix > 400) a.secant_lock_prefix = 400;
+        } else if (k == "--out") {
+            require_value(k);
+            a.out_path = argv[++i];
+            if (a.out_path.empty()) {
+                std::cerr << "ERROR: --out path must be non-empty\n";
+                std::exit(1);
+            }
+        } else if (k == "--out_steps") {
+            require_value(k);
+            a.out_steps_path = argv[++i];
+            if (a.out_steps_path.empty()) {
+                std::cerr << "ERROR: --out_steps path must be non-empty\n";
+                std::exit(1);
+            }
+        } else if (k == "--out_t") {
+            require_value(k);
+            a.out_t_path = argv[++i];
+            if (a.out_t_path.empty()) {
+                std::cerr << "ERROR: --out_t path must be non-empty\n";
+                std::exit(1);
+            }
         } else {
             std::cerr << "ERROR: Unknown argument: " << k << "\n";
             std::exit(1);
@@ -492,20 +565,69 @@ static Args parse_args(int argc, char **argv) {
     return a;
 }
 
+static inline std::string trim_local(std::string s) {
+    while (!s.empty() && std::isspace((unsigned char)s.front())) s.erase(s.begin());
+    while (!s.empty() && std::isspace((unsigned char)s.back())) s.pop_back();
+    return s;
+}
+
+static std::string default_steps_path_from_out(const std::string& out) {
+    return out + ".steps.txt";
+}
+
+static std::string default_t_path_from_out(const std::string& out) {
+    return out + ".t.txt";
+}
+
 // -----------------------------
 // Main
 // -----------------------------
 int main(int argc, char **argv) {
     Args args = parse_args(argc, argv);
 
-    std::string t_string = trim(args.t);
+    Pow10Cache p10;
+
+    if (args.out_steps_path.empty()) {
+        args.out_steps_path = default_steps_path_from_out(args.out_path);
+    }
+    if (args.out_t_path.empty()) {
+        args.out_t_path = default_t_path_from_out(args.out_path);
+    }
+
+    FILE* fout = std::fopen(args.out_path.c_str(), "wb");
+    if (!fout) {
+        std::perror("ERROR: fopen(--out) failed");
+        std::exit(1);
+    }
+
+    FILE* fsteps = std::fopen(args.out_steps_path.c_str(), "wb");
+    if (!fsteps) {
+        std::perror("ERROR: fopen(--out_steps) failed");
+        std::fclose(fout);
+        std::exit(1);
+    }
+
+    FILE* ft = std::fopen(args.out_t_path.c_str(), "wb");
+    if (!ft) {
+        std::perror("ERROR: fopen(--out_t) failed");
+        std::fclose(fsteps);
+        std::fclose(fout);
+        std::exit(1);
+    }
+
+    std::cout << "OUT:       " << args.out_path << "\n";
+    std::cout << "OUT_STEPS: " << args.out_steps_path << "\n";
+    std::cout << "OUT_T:     " << args.out_t_path << "\n";
+
+    std::string t_string = trim_local(args.t);
     Decimal t_work = decimal_from_string(t_string);
 
     int work_frac_digits = count_decimals_str(t_string);
+    t_work = t_can_cached(t_work, work_frac_digits, p10);
 
     const int internal_max_frac = args.depth + args.overshoot_frac;
 
-    int start_int_digits = count_int_digits(t_work);
+    int start_int_digits = count_int_digits_cached(t_work, p10);
     int compute_dps = (start_int_digits + internal_max_frac) + args.max_step + 256;
     slong prec_bits = dps_to_bits(compute_dps);
 
@@ -514,19 +636,33 @@ int main(int argc, char **argv) {
 
     std::string dir_effective = args.dir;
     bool lock_found = false;
-
-    // NEW: Once CAP triggers, permanently play it safer on digit growth for this run.
     bool safety_after_cap = false;
 
-    // Cache final slope(mid) as arb (avoid Decimal conversion in hot loop).
     arb_t final_slope_arb;
     arb_init(final_slope_arb);
     bool have_final_slope = false;
 
-    // Cache last pre-step energy (E_now) for final ratio/drop.
     arb_t last_e_pre;
     arb_init(last_e_pre);
     bool have_last_e_pre = false;
+
+    // Header to files
+    std::fprintf(fout, "nsniperv4 minimal exact-landing run log\n");
+    std::fprintf(fout, "t=%s\n", args.t.c_str());
+    std::fprintf(fout, "depth=%d\n", args.depth);
+    std::fprintf(fout, "max_steps=%d\n", args.max_steps);
+    std::fprintf(fout, "overshoot_frac=%d\n", args.overshoot_frac);
+    std::fprintf(fout, "max_step=%d\n", args.max_step);
+    std::fprintf(fout, "dir=%s\n", args.dir.c_str());
+    std::fprintf(fout, "compute_dps=%d\n", compute_dps);
+    std::fprintf(fout, "arb_prec_bits=%lld\n", (long long)prec_bits);
+    std::fprintf(fout, "out_steps=%s\n", args.out_steps_path.c_str());
+    std::fprintf(fout, "out_t=%s\n", args.out_t_path.c_str());
+    std::fprintf(fout, "----------------------------------------\n");
+    std::fflush(fout);
+
+    std::fprintf(fsteps, "STEP TRACE (cheap): step, frac(after), step_size, probe_depth, CAP/FIT, dir, log10(|E_pre|), log10(|J|), slope sign\n");
+    std::fflush(fsteps);
 
     std::cout << "DEPTH (exact frac digits): " << args.depth << "\n";
     std::cout << "OVERSHOOT_FRAC:            " << args.overshoot_frac << "\n";
@@ -544,7 +680,8 @@ int main(int argc, char **argv) {
 
     arb_t e_now, e_plus, diff, slope, raw_jump, abs_raw_jump;
     arb_t h_arb, cap_arb, safe_jump;
-    arb_t e_ratio, e_drop_pct, one_arb, hundred_arb, tmp_arb; // final only
+    arb_t e_ratio, e_drop_pct, one_arb, hundred_arb, tmp_arb;
+
     arb_init(e_now);
     arb_init(e_plus);
     arb_init(diff);
@@ -566,6 +703,8 @@ int main(int argc, char **argv) {
     while (total_steps < args.max_steps) {
         total_steps += 1;
 
+        // ----- EXACT-LANDING STEP SCHEDULER (doubling regime, safe clamp) -----
+        // Base doubling rule (unchanged):
         int step_size_raw = (work_frac_digits < 5) ? 1 : work_frac_digits;
 
         int step_size_capped = step_size_raw;
@@ -576,66 +715,73 @@ int main(int argc, char **argv) {
             step_size_eff = 1;
         } else {
             int subtract = 1;
-
-            // After CAP triggers once, play it safer: subtract 2 if it makes sense.
-            // "if decimals available" -> require step_size_capped >= 3 so (capped - 2) stays >= 1.
-            if (safety_after_cap && step_size_capped >= 3) {
-                subtract = 2;
-            }
-
+            if (safety_after_cap && step_size_capped >= 3) subtract = 2;
             step_size_eff = step_size_capped - subtract;
             if (step_size_eff < 1) step_size_eff = 1;
         }
 
+        // Exact landing clamp (NEW):
+        // Never overshoot args.depth. If we're within range, shrink the effective step.
+        if (work_frac_digits < args.depth) {
+            int remaining = args.depth - work_frac_digits;
+            if (remaining < 1) remaining = 1;
+            if (step_size_eff > remaining) step_size_eff = remaining;
+        } else {
+            // already at/over depth, force termination path below
+            step_size_eff = 1;
+        }
+
         int target_frac = work_frac_digits + step_size_eff;
-        if (target_frac > internal_max_frac) target_frac = internal_max_frac;
+        if (target_frac > args.depth) target_frac = args.depth; // hard safety
 
-        int probe_depth;
-        if (step_size_capped == args.max_step) probe_depth = args.depth + 64;
-        else probe_depth = target_frac + 5;
-
+        // Probe depth logic: DO NOT CHANGE (as requested)
+        int probe_depth = work_frac_digits;
+        if (probe_depth < 6) probe_depth = 6;
+        probe_depth += 5;
         if (probe_depth > internal_max_frac) probe_depth = internal_max_frac;
         if (probe_depth < 1) probe_depth = 1;
 
-        Decimal h_dec(1, pow10_z(probe_depth));
-        ctx.arb_set_decimal_exact(h_arb, h_dec);
+        // Prec policy (same pattern as your current file)
+        int base_guard = 256;
+        int cancel_guard = probe_depth + 64;
+        int step_dps = (start_int_digits + probe_depth) + base_guard + cancel_guard;
+        slong prec_step_bits = clamp_step_bits(dps_to_bits(step_dps));
 
-        // 1) E_now at current t_work
-        ctx.compute(t_work, sigma);
+        // Compute E_now (no cache)
+        ctx.compute(t_work, sigma, prec_step_bits);
         arb_set(e_now, ctx.abs_z);
 
-        // cache last pre-step energy for final ratio/drop
         arb_set(last_e_pre, e_now);
         have_last_e_pre = true;
 
-        // 2) E_plus at t_work + h
-        Decimal t_plus = t_work + h_dec;
-        ctx.compute(t_plus, sigma);
+        // Forward-diff slope only (minimal)
+        mpz_class h_den = p10.get(probe_depth);
+        Decimal h_dec = Decimal(1, h_den);
+        ctx.arb_set_decimal_exact_prec(h_arb, h_dec, prec_step_bits);
+
+        Decimal t_plus_can = t_can_cached(t_work + h_dec, probe_depth, p10);
+
+        ctx.compute(t_plus_can, sigma, prec_step_bits);
         arb_set(e_plus, ctx.abs_z);
 
-        // slope = (E_plus - E_now)/h
-        arb_sub(diff, e_plus, e_now, prec_bits);
+        arb_sub(diff, e_plus, e_now, prec_step_bits);
         if (arb_is_zero(diff)) {
-            arb_set_str(slope, "1e-300", prec_bits);
+            arb_set_str(slope, "1e-300", prec_step_bits);
         } else {
-            arb_div(slope, diff, h_arb, prec_bits);
+            arb_div(slope, diff, h_arb, prec_step_bits);
         }
+        arb_div(raw_jump, e_now, slope, prec_step_bits);
 
-        // raw_jump = E_now / slope
-        arb_div(raw_jump, e_now, slope, prec_bits);
-
-        // cap = 10^-work_frac_digits (or 0.1 at integer start)
-        Decimal cap_dec(1, pow10_z(work_frac_digits));
+        // CAP threshold
+        Decimal cap_dec;
         if (work_frac_digits == 0) cap_dec = Decimal(1, 10);
-        ctx.arb_set_decimal_exact(cap_arb, cap_dec);
+        else cap_dec = Decimal(1, p10.get(work_frac_digits));
+        ctx.arb_set_decimal_exact_prec(cap_arb, cap_dec, prec_step_bits);
 
         arb_abs(abs_raw_jump, raw_jump);
         bool is_cap = arb_gt(abs_raw_jump, cap_arb);
 
-        // NEW: CAP still functions normally, but sets the safety flag once triggered.
-        if (is_cap && work_frac_digits > 5) {
-            safety_after_cap = true;
-        }
+        if (is_cap && work_frac_digits > 5) safety_after_cap = true;
 
         if (is_cap && !lock_found) {
             lock_found = true;
@@ -653,17 +799,16 @@ int main(int argc, char **argv) {
             } else if (dir_effective == "up") {
                 arb_neg(safe_jump, cap_arb);
             } else {
-                // CAP auto chooses direction via 2 extra zeta calls (this IS used to decide next update).
                 arb_t e_cap_plus, e_cap_minus;
                 arb_init(e_cap_plus);
                 arb_init(e_cap_minus);
 
-                Decimal t_cap_plus  = t_work + cap_dec;
-                Decimal t_cap_minus = t_work - cap_dec;
+                Decimal t_cap_plus_can  = t_can_cached(t_work + cap_dec, work_frac_digits, p10);
+                Decimal t_cap_minus_can = t_can_cached(t_work - cap_dec, work_frac_digits, p10);
 
-                ctx.compute(t_cap_plus, sigma);
+                ctx.compute(t_cap_plus_can, sigma, prec_step_bits);
                 arb_set(e_cap_plus, ctx.abs_z);
-                ctx.compute(t_cap_minus, sigma);
+                ctx.compute(t_cap_minus_can, sigma, prec_step_bits);
                 arb_set(e_cap_minus, ctx.abs_z);
 
                 if (arb_lt(e_cap_plus, e_cap_minus)) {
@@ -676,6 +821,7 @@ int main(int argc, char **argv) {
                 arb_clear(e_cap_minus);
             }
         } else {
+            // exact landing: we already computed target_frac clamped to args.depth
             next_work_frac = target_frac;
             arb_set(safe_jump, raw_jump);
 
@@ -689,13 +835,11 @@ int main(int argc, char **argv) {
             }
         }
 
-        // cache slope(mid) arb when we first hit depth-range
         if (!have_final_slope && next_work_frac >= args.depth) {
             arb_set(final_slope_arb, slope);
             have_final_slope = true;
         }
 
-        // ---- APPLY UPDATE IN DECIMAL SPACE ----
         Decimal t_next_dec = t_work;
 
         if (is_cap) {
@@ -703,30 +847,32 @@ int main(int argc, char **argv) {
             else t_next_dec = t_work - cap_dec;
         } else {
             int jump_trunc_decimals = next_work_frac + 256;
-            Decimal jump_dec = arb_mid_to_decimal_exact_trunc(safe_jump, jump_trunc_decimals);
+            Decimal jump_dec = arb_mid_to_decimal_exact_trunc_cached(safe_jump, jump_trunc_decimals, p10);
             t_next_dec = t_work - jump_dec;
         }
 
+        // Maintain original internal_max_frac safety, but never store beyond args.depth
         if (next_work_frac > internal_max_frac) next_work_frac = internal_max_frac;
-        t_work = strict_truncate_toward0(t_next_dec, next_work_frac);
+        if (next_work_frac > args.depth) next_work_frac = args.depth;
 
-        // ---- cheap per-step trace (uses E_now, no extra zeta compute) ----
+        t_work = strict_truncate_toward0_cached(t_next_dec, next_work_frac, p10);
+
         if (!args.quiet) {
             print_step_line(total_steps, next_work_frac, step_size_eff, probe_depth, is_cap, dir_effective, e_now, safe_jump, slope);
         }
+        fprint_step_line(fsteps, total_steps, next_work_frac, step_size_eff, probe_depth, is_cap, dir_effective, e_now, safe_jump, slope);
+        if ((total_steps % 50) == 0) std::fflush(fsteps);
 
         work_frac_digits = next_work_frac;
 
-        // Termination: when reached depth, compute final energy once at final t (required).
         if (work_frac_digits >= args.depth) {
             Decimal t_final = t_work;
             if (work_frac_digits > args.depth) {
-                t_final = strict_truncate_toward0(t_work, args.depth);
+                t_final = strict_truncate_toward0_cached(t_work, args.depth, p10);
             }
 
-            ctx.compute(t_final, sigma); // FINAL sink energy at t_final in ctx.abs_z
+            ctx.compute(t_final, sigma, prec_bits);
 
-            // Final ratio/drop computed vs last pre-step energy (E_pre)
             if (!have_last_e_pre || arb_is_zero(last_e_pre)) {
                 arb_zero(e_ratio);
                 arb_zero(e_drop_pct);
@@ -737,32 +883,46 @@ int main(int argc, char **argv) {
             }
 
             std::cout << ">>> REACHED TARGET DEPTH (SETTLED) <<<\n";
-            std::cout << std::string(220, '-') << "\n";
-
             print_arb_bracket("FINAL SINK ENERGY (SCI, MID+/-RAD)", ctx.abs_z, 50);
+            std::cout << "WROTE FULL OUTPUT TO: " << args.out_path << "\n";
+            std::cout << "WROTE STEP TRACE TO:  " << args.out_steps_path << "\n";
+            std::cout << "WROTE T-ONLY TO:      " << args.out_t_path << "\n";
+
+            std::fprintf(fout, ">>> REACHED TARGET DEPTH (SETTLED) <<<\n");
+            std::fprintf(fout, "----------------------------------------\n");
+            fprint_arb_bracket(fout, "FINAL SINK ENERGY (SCI, MID+/-RAD)", ctx.abs_z, 80);
 
             std::string final_energy_fixed = arb_mid_to_fixed_decimal_adaptive_trim(ctx.abs_z, 120, args.depth + 256);
-            std::cout << "FINAL SINK ENERGY (MID, FIXED): " << final_energy_fixed << "\n";
+            std::fprintf(fout, "FINAL SINK ENERGY (MID, FIXED): %s\n", final_energy_fixed.c_str());
 
-            std::cout << "FINAL T VALUE:     " << fixed_trunc_str_decimal_exact(t_final, args.depth) << "\n";
+            std::string t_final_str = fixed_trunc_str_decimal_exact_cached(t_final, args.depth, p10);
+            std::fprintf(fout, "FINAL T VALUE:     %s\n", t_final_str.c_str());
+
+            // T-only file: exactly digits + '\n'
+            std::fwrite(t_final_str.data(), 1, t_final_str.size(), ft);
+            std::fflush(ft);
 
             if (!have_final_slope) {
                 arb_set(final_slope_arb, slope);
                 have_final_slope = true;
             }
-            Decimal final_slope_mid_dec = arb_mid_to_decimal_exact_trunc(final_slope_arb, args.depth);
-            std::cout << "FINAL_SLOPE(mid):  " << fixed_trunc_str_decimal_exact(final_slope_mid_dec, args.depth) << "\n";
+            Decimal final_slope_mid_dec = arb_mid_to_decimal_exact_trunc_cached(final_slope_arb, args.depth, p10);
+            std::string slope_str = fixed_trunc_str_decimal_exact_cached(final_slope_mid_dec, args.depth, p10);
+            std::fprintf(fout, "FINAL_SLOPE(mid):  %s\n", slope_str.c_str());
 
-            Decimal final_energy_ratio_dec = arb_mid_to_decimal_exact_trunc(e_ratio, args.depth);
-            Decimal final_energy_drop_pct_dec = arb_mid_to_decimal_exact_trunc(e_drop_pct, args.depth);
+            Decimal final_energy_ratio_dec = arb_mid_to_decimal_exact_trunc_cached(e_ratio, args.depth, p10);
+            Decimal final_energy_drop_pct_dec = arb_mid_to_decimal_exact_trunc_cached(e_drop_pct, args.depth, p10);
 
-            std::string ratio_out = fixed_trunc_str_decimal_exact(final_energy_ratio_dec, args.depth);
-            std::string drop_out  = fixed_trunc_str_decimal_exact(final_energy_drop_pct_dec, args.depth);
+            std::string ratio_out = fixed_trunc_str_decimal_exact_cached(final_energy_ratio_dec, args.depth, p10);
+            std::string drop_out  = fixed_trunc_str_decimal_exact_cached(final_energy_drop_pct_dec, args.depth, p10);
             ratio_out = trim_trailing_zeros_fixed(ratio_out);
             drop_out  = trim_trailing_zeros_fixed(drop_out);
 
-            std::cout << "FINAL_ENERGY_RATIO:    " << ratio_out << "\n";
-            std::cout << "FINAL_ENERGY_DROP_PCT: " << drop_out << "\n";
+            std::fprintf(fout, "FINAL_ENERGY_RATIO:    %s\n", ratio_out.c_str());
+            std::fprintf(fout, "FINAL_ENERGY_DROP_PCT: %s\n", drop_out.c_str());
+
+            std::fflush(fout);
+            std::fflush(fsteps);
 
             // clear
             arb_clear(e_now);
@@ -784,47 +944,38 @@ int main(int argc, char **argv) {
             arb_clear(final_slope_arb);
             arb_clear(last_e_pre);
 
+            std::fclose(ft);
+            std::fclose(fsteps);
+            std::fclose(fout);
             return 0;
         }
     }
 
-    std::cout << std::string(220, '-') << "\n";
+    // max_steps reached without depth: do one final compute and log to file
+    ctx.compute(t_work, sigma, prec_bits);
 
-    // ---------------------------------------------------------
-    // If max_steps reached without depth, do a final compute once.
-    // ---------------------------------------------------------
-    ctx.compute(t_work, sigma);
+    std::cout << ">>> MAX_STEPS REACHED (FINAL COMPUTE) <<<\n";
+    print_arb_bracket("FINAL SINK ENERGY (SCI, MID+/-RAD)", ctx.abs_z, 50);
+    std::cout << "WROTE FULL OUTPUT TO: " << args.out_path << "\n";
+    std::cout << "WROTE STEP TRACE TO:  " << args.out_steps_path << "\n";
+    std::cout << "WROTE T-ONLY TO:      " << args.out_t_path << "\n";
 
-    std::cout << "FINAL SINK ENERGY (RAW):       ";
-    arb_printn(ctx.abs_z, 3000, 0);
-    std::cout << "\n";
+    std::fprintf(fout, ">>> MAX_STEPS REACHED (FINAL COMPUTE) <<<\n");
+    std::fprintf(fout, "----------------------------------------\n");
+    fprint_arb_bracket(fout, "FINAL SINK ENERGY (SCI, MID+/-RAD)", ctx.abs_z, 80);
 
     std::string raw_energy_fixed = arb_mid_to_fixed_decimal_adaptive_trim(ctx.abs_z, 120, args.depth);
-    std::cout << "FINAL SINK ENERGY (RAW,FIXED): " << raw_energy_fixed << "\n";
-    std::cout << "FINAL T VALUE:                 " << fixed_trunc_str_decimal_exact(t_work, work_frac_digits) << "\n";
+    std::fprintf(fout, "FINAL SINK ENERGY (RAW,FIXED): %s\n", raw_energy_fixed.c_str());
 
-    Decimal end_slope_dec = arb_mid_to_decimal_exact_trunc(slope, work_frac_digits);
-    std::cout << "FINAL_SLOPE(mid):              " << fixed_trunc_str_decimal_exact(end_slope_dec, work_frac_digits) << "\n";
+    std::string t_str = fixed_trunc_str_decimal_exact_cached(t_work, work_frac_digits, p10);
+    std::fprintf(fout, "FINAL T VALUE:                 %s\n", t_str.c_str());
 
-    if (!have_last_e_pre || arb_is_zero(last_e_pre)) {
-        arb_zero(e_ratio);
-        arb_zero(e_drop_pct);
-    } else {
-        arb_div(e_ratio, ctx.abs_z, last_e_pre, prec_bits);
-        arb_sub(tmp_arb, one_arb, e_ratio, prec_bits);
-        arb_mul(e_drop_pct, tmp_arb, hundred_arb, prec_bits);
-    }
+    // T-only file
+    std::fwrite(t_str.data(), 1, t_str.size(), ft);
+    std::fflush(ft);
 
-    Decimal final_energy_ratio_dec = arb_mid_to_decimal_exact_trunc(e_ratio, args.depth);
-    Decimal final_energy_drop_pct_dec = arb_mid_to_decimal_exact_trunc(e_drop_pct, args.depth);
-
-    std::string ratio_out = fixed_trunc_str_decimal_exact(final_energy_ratio_dec, args.depth);
-    std::string drop_out  = fixed_trunc_str_decimal_exact(final_energy_drop_pct_dec, args.depth);
-    ratio_out = trim_trailing_zeros_fixed(ratio_out);
-    drop_out  = trim_trailing_zeros_fixed(drop_out);
-
-    std::cout << "FINAL_ENERGY_RATIO:            " << ratio_out << "\n";
-    std::cout << "FINAL_ENERGY_DROP_PCT:         " << drop_out << "\n";
+    std::fflush(fout);
+    std::fflush(fsteps);
 
     arb_clear(e_now);
     arb_clear(e_plus);
@@ -845,5 +996,8 @@ int main(int argc, char **argv) {
     arb_clear(final_slope_arb);
     arb_clear(last_e_pre);
 
+    std::fclose(ft);
+    std::fclose(fsteps);
+    std::fclose(fout);
     return 0;
 }

@@ -531,7 +531,7 @@ int main(int argc, char **argv) {
         if (probe_depth < 1) probe_depth = 1;
 
         Decimal h_dec(1, pow10_z(probe_depth));
-        ctx.arb_set_decimal_safe(h_arb, h_dec);
+        ctx.arb_set_decimal_exact(h_arb, h_dec);
 
         // E(t)
         ctx.compute(t_work, sigma);
@@ -553,7 +553,7 @@ int main(int argc, char **argv) {
 
         Decimal cap_dec(1, pow10_z(work_frac_digits));
         if (work_frac_digits == 0) cap_dec = Decimal(1, 10);
-        ctx.arb_set_decimal_safe(cap_arb, cap_dec);
+        ctx.arb_set_decimal_exact(cap_arb, cap_dec);
 
         arb_abs(abs_raw_jump, raw_jump);
         bool is_cap = arb_gt(abs_raw_jump, cap_arb);

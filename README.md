@@ -1,94 +1,93 @@
-SpectralToolkit
+# SpectralToolkit
+
 Spectral Toolkit is a computational framework for analyzing the geometry, stability, and failure modes of the Riemann zeta function through raw, non-smoothed energy landscapes.
 
 The toolkit discards smoothing, squaring, mollifying, and linearization to work directly with the raw magnitude:
 
+```
 E(σ, T) = |ζ(σ + iT)|
+```
+
 It targets the non-smooth geometry, induced gradient flow, and constrained dynamics of the function at high precision. This is a direct interrogation of the zeta function's magnitude as a physical terrain.
 
-Capabilities
-High-Precision Evaluation: Full GMP / MPFR / MPC / Arb implementation for arbitrary precision.
+## Capabilities
 
-Direct Magnitude Sampling: Operates on |ζ(σ+iT)| without phase correction or rotation.
+- **High-Precision Evaluation**: Full GMP / MPFR / MPC / Arb implementation for arbitrary precision.
 
-Geometric Detection:
+- **Direct Magnitude Sampling**: Operates on |ζ(σ+iT)| without phase correction or rotation.
 
-Cusp minima at nontrivial zeros
+- **Geometric Detection**:
+  - Cusp minima at nontrivial zeros
+  - Critical-line channeling (σ → 1/2)
+  - Rigid basin separation (Lehmer pairs)
+  - Integer-barrier wall formation
+  - Catastrophic collapse under adversarial perturbation
 
-Critical-line channeling (σ → 1/2)
-
-Rigid basin separation (Lehmer pairs)
-
-Integer-barrier wall formation
-
-Catastrophic collapse under adversarial perturbation
-
-Raw Signal Processing:
-
-No |ζ|², no log |ζ|, no mollifiers.
-
-No smoothing, artificial locking, snapping, or rounding toward expected results.
+- **Raw Signal Processing**:
+  - No |ζ|², no log |ζ|, no mollifiers.
+  - No smoothing, artificial locking, snapping, or rounding toward expected results.
 
 The system treats the zeta magnitude as a non-smooth energy functional.
 
-Repository Layout
-C++ sources: High-precision zeta evaluation, energy sampling, and sweep logic.
+## Repository Layout
 
-Experiments: Lehmer pair sweeps, integer barrier tests, and cone/ridge detection.
+- **C++ sources**: High-precision zeta evaluation, energy sampling, and sweep logic.
 
-Sabotage: Adversarial stress-tests to verify landscape stability.
+- **Experiments**: Lehmer pair sweeps, integer barrier tests, and cone/ridge detection.
 
-Artifacts: Raw numeric output for inspection.
+- **Sabotage**: Adversarial stress-tests to verify landscape stability.
 
-VS Code: .vscode/tasks.json included for reproducible builds under MSYS2 UCRT64.
+- **Artifacts**: Raw numeric output for inspection.
 
-Build Environment (Windows)
-Platform: Windows / MSYS2 (UCRT64) / g++ Dependencies: GMP, MPFR, MPC, FLINT, Arb
+- **VS Code**: .vscode/tasks.json included for reproducible builds under MSYS2 UCRT64.
 
-Installation:
+## Build Environment (Windows)
 
-Bash
+**Platform**: Windows / MSYS2 (UCRT64) / g++  
+**Dependencies**: GMP, MPFR, MPC, FLINT, Arb
 
+**Installation**:
+```bash
 pacman -S mingw-w64-ucrt-x86_64-gcc \
           mingw-w64-ucrt-x86_64-gmp \
           mingw-w64-ucrt-x86_64-mpfr \
           mingw-w64-ucrt-x86_64-mpc \
           mingw-w64-ucrt-x86_64-flint \
           mingw-w64-ucrt-x86_64-arb
-VS Code Setup
+```
+
+## VS Code Setup
+
 The repository includes a configured .vscode/ directory.
 
-Builds execute through UCRT64.
+- Builds execute through UCRT64.
+- Tasks link directly against the shared zeta implementation.
+- Compilation flags are explicit; no abstraction layers.
 
-Tasks link directly against the shared zeta implementation.
+## Design Philosophy
 
-Compilation flags are explicit; no abstraction layers.
+1. **Raw Geometry**: Any transformation that removes cusp structure is rejected. The raw landscape is the ground truth.
 
-Design Philosophy
-Raw Geometry: Any transformation that removes cusp structure is rejected. The raw landscape is the ground truth.
+2. **Sabotage Verification**: Failure is the primary metric. The landscape must survive adversarial data input.
 
-Sabotage Verification: Failure is the primary metric. The landscape must survive adversarial data input.
+3. **Signal in Non-Smoothness**: Computers can handle what analysis avoids. The non-smooth cusps are the signal, not an error condition.
 
-Signal in Non-Smoothness: Computers can handle what analysis avoids. The non-smooth cusps are the signal, not an error condition.
+4. **Absolute Reproducibility**: Numeric output is preserved verbatim.
 
-Absolute Reproducibility: Numeric output is preserved verbatim.
+## Operational Evidence for Hilbert–Pólya
 
-Operational Evidence for Hilbert–Pólya
 This toolkit demonstrates that the raw zeta magnitude behaves as a spectral object when smoothing assumptions are dropped. The computational evidence shows:
 
-Zeros appear as ground states.
-
-The critical line acts as an attractor.
-
-Lehmer pairs remain separated by rigid geometric barriers.
-
-Constrained domains form walls.
-
-Adversarial perturbations cause topological collapse.
+- Zeros appear as ground states.
+- The critical line acts as an attractor.
+- Lehmer pairs remain separated by rigid geometric barriers.
+- Constrained domains form walls.
+- Adversarial perturbations cause topological collapse.
 
 The software provides explicit, inspectable evidence of these spectral properties in the raw energy landscape.
 
-Author
+## Author
+
 Brennon Reid
 
 All code, experiments, and numerical results in this repository are my own.

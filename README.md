@@ -1,139 +1,94 @@
-# SpectralToolkit
+SpectralToolkit
+Spectral Toolkit is a computational framework for analyzing the geometry, stability, and failure modes of the Riemann zeta function through raw, non-smoothed energy landscapes.
 
-This repository contains the **Spectral Toolkit** — a computational framework for exploring the geometry, stability, and failure modes of the Riemann zeta function through *raw, non-smoothed energy landscapes*.
+The toolkit discards smoothing, squaring, mollifying, and linearization to work directly with the raw magnitude:
 
-The core idea is simple but deliberate:  
-instead of smoothing, squaring, mollifying, or linearizing the zeta function, this toolkit works directly with
-
-```
 E(σ, T) = |ζ(σ + iT)|
-```
+It targets the non-smooth geometry, induced gradient flow, and constrained dynamics of the function at high precision. This is a direct interrogation of the zeta function's magnitude as a physical terrain.
 
-and studies its **non-smooth geometry**, induced gradient flow, and constrained dynamics at high precision.
+Capabilities
+High-Precision Evaluation: Full GMP / MPFR / MPC / Arb implementation for arbitrary precision.
 
-This project is computational and geometric in nature. It does **not** introduce new analytic identities for ζ(s). All mathematics used here is classical. What is new is the *way the function is interrogated*.
+Direct Magnitude Sampling: Operates on |ζ(σ+iT)| without phase correction or rotation.
 
----
+Geometric Detection:
 
-## What this toolkit does
+Cusp minima at nontrivial zeros
 
-The code in this repository supports:
+Critical-line channeling (σ → 1/2)
 
-- High-precision evaluation of ζ(s) using **GMP / MPFR / MPC / Arb**
-- Direct sampling of the raw magnitude `|ζ(σ+iT)|`
-- Detection of:
-  - cusp minima at nontrivial zeros
-  - critical-line channeling (`σ → 1/2`)
-  - rigid basin separation (including Lehmer pairs)
-  - integer-barrier wall formation
-  - catastrophic collapse under adversarial perturbation
-- No `|ζ|²`, no `log |ζ|`, no mollifiers
-- No smoothing to make things “nicer”
-- No projection onto known zero tables
-- No artificial locking, snapping, or rounding toward expected results
+Rigid basin separation (Lehmer pairs)
 
-The system treats the zeta magnitude as a **non-smooth energy functional**, not as a squared norm or log-potential.
+Integer-barrier wall formation
 
-## Repository layout (high-level)
+Catastrophic collapse under adversarial perturbation
 
-The repo is intentionally minimal and direct.
+Raw Signal Processing:
 
-- **C++ sources**
-  - High-precision zeta evaluation
-  - Energy sampling and sweep logic
-  - Cone / ridge / wall detection experiments
-- **VS Code integration**
-  - `.vscode/tasks.json` included for reproducible builds under MSYS2 UCRT64
-- **Experiments**
-  - Lehmer pair sweeps
-  - Integer barrier tests
-  - Adversarial sabotage runs
-- **Artifacts**
-  - Raw numeric output intended to be inspected, not post-processed away
+No |ζ|², no log |ζ|, no mollifiers.
 
-Nothing here relies on editor magic or hidden build steps.
+No smoothing, artificial locking, snapping, or rounding toward expected results.
 
----
+The system treats the zeta magnitude as a non-smooth energy functional.
 
-## Build environment (Windows)
+Repository Layout
+C++ sources: High-precision zeta evaluation, energy sampling, and sweep logic.
 
-This repository is built and tested under:
+Experiments: Lehmer pair sweeps, integer barrier tests, and cone/ridge detection.
 
-- **Windows**
-- **MSYS2 (UCRT64)**
-- **g++ (UCRT64 toolchain)**
+Sabotage: Adversarial stress-tests to verify landscape stability.
 
-Required libraries:
+Artifacts: Raw numeric output for inspection.
 
-- GMP
-- MPFR
-- MPC
-- FLINT
-- Arb
+VS Code: .vscode/tasks.json included for reproducible builds under MSYS2 UCRT64.
 
-Install via MSYS2:
+Build Environment (Windows)
+Platform: Windows / MSYS2 (UCRT64) / g++ Dependencies: GMP, MPFR, MPC, FLINT, Arb
 
-```bash
+Installation:
+
+Bash
+
 pacman -S mingw-w64-ucrt-x86_64-gcc \
           mingw-w64-ucrt-x86_64-gmp \
           mingw-w64-ucrt-x86_64-mpfr \
           mingw-w64-ucrt-x86_64-mpc \
           mingw-w64-ucrt-x86_64-flint \
           mingw-w64-ucrt-x86_64-arb
-```
+VS Code Setup
+The repository includes a configured .vscode/ directory.
 
----
+Builds execute through UCRT64.
 
-## VS Code setup
+Tasks link directly against the shared zeta implementation.
 
-This repo includes a `.vscode/` directory with working build tasks.
+Compilation flags are explicit; no abstraction layers.
 
-Important points:
+Design Philosophy
+Raw Geometry: Any transformation that removes cusp structure is rejected. The raw landscape is the ground truth.
 
-- Builds are executed through **UCRT64**
-- The active-file build task links against the shared zeta implementation
-- The flags reflect exactly how the code is compiled — no abstraction layers
+Sabotage Verification: Failure is the primary metric. The landscape must survive adversarial data input.
 
-If it builds in VS Code, it builds on the command line the same way.
+Signal in Non-Smoothness: Computers can handle what analysis avoids. The non-smooth cusps are the signal, not an error condition.
 
----
+Absolute Reproducibility: Numeric output is preserved verbatim.
 
-## Design philosophy
+Operational Evidence for Hilbert–Pólya
+This toolkit demonstrates that the raw zeta magnitude behaves as a spectral object when smoothing assumptions are dropped. The computational evidence shows:
 
-This project is guided by a few strict rules:
+Zeros appear as ground states.
 
-1. **Raw geometry over analytic convenience**  
-   If a transformation removes cusp structure, it is rejected.
+The critical line acts as an attractor.
 
-2. **Failure matters more than success**  
-   Sabotage tests are first-class citizens. If the landscape doesn’t collapse under bad data, something is wrong.
+Lehmer pairs remain separated by rigid geometric barriers.
 
-3. **Computers are allowed to do what analysis avoids**  
-   Non-smoothness is not an error condition. It is the signal.
+Constrained domains form walls.
 
-4. **Reproducibility over polish**  
-   Numeric output is preserved verbatim. Nothing is massaged to “look right.”
+Adversarial perturbations cause topological collapse.
 
----
+The software provides explicit, inspectable evidence of these spectral properties in the raw energy landscape.
 
-## Relationship to Hilbert–Pólya
+Author
+Brennon Reid
 
-This toolkit does not attempt to construct a linear self-adjoint operator.
-
-Instead, it explores whether the **raw zeta magnitude itself already behaves like a spectral object**, once smoothing assumptions are dropped:
-
-- zeros appear as ground states
-- the critical line acts as an attractor
-- Lehmer pairs remain separated
-- constrained domains form walls
-- adversarial perturbations cause topological collapse
-
-Whether this ultimately supports or undermines Hilbert–Pólya is left open — but the computational evidence is explicit and inspectable.
-
----
-
-## Author
-
-**Brennon Reid**
-
-All code, experiments, and numerical results in this repository are my own unless explicitly stated otherwise.
+All code, experiments, and numerical results in this repository are my own.

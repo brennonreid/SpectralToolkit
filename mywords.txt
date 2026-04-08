@@ -1,0 +1,29 @@
+okay, the zeros of zeta are a prime generated series of perfect cancellations that collapse to 0 at chaotic values on the decimal numberline.
+
+while chaotic it is a forward moving process, it is driven by T a decimal value which while evaluated is an ever increasing value (revisting the same T just reproduces the same result)
+
+this T value, when passed into the raw zeta function, when taken the absolute value gives you a forward magnitude of distance from 0 (not distance to next 0)
+
+T and magnitude, do not share the same ruler. the difference in T and magnitude can shrink and grow between each 0. however, magnitude can only rise and fall since magnitude is the absolute distance from 0 (after the distance of apex middle the magnitude returns to 0 at the next 0). the zeta function iteslf is a smooth analytical function as well, it won't produce noise and should supply a smooth output with a smooth input. (and remember T is still a smooth input, however the mapping/ruler system from T to magnitude is chaotic) each magnitude can only be root found a single time on either side of the apex for those magnitudes when the magnitude reaches 0 again, that creates a scalar unit. since only 1 magnitude can be root found on each side of the apex that generates a structural uniformity.
+
+by using and enforcing the structural rigigity of the zeros using this magnitude, creates a scalar unit of measurement and a unique scalar (the apex ratio if only magnitude can be root found either side of the apex) thereby demistifying the shape and symmetry of the cancellation.
+using this symmetric magnitude pattern, can create a euclidian container to fully measure and explore the magnitude and cancellation structure.
+
+now i've defined my space and the measurements that i'm using. now onto the reduction of absurdity. 
+
+1) prove all zeros must lie on the critical line 0 at 1/2
+all current research shows that all known zeros satisfy this condition. lets explain why this must happen. as discussed earlier, a zero is a series of cancellations that traverse over a scalar unit inside this Euclidian space.
+	a) why does this have to happen?
+	the scalar input of T, drives the engine forward. while the ruler is still chaotic, it also continues to drive this pattern forward. the cancellation progression is a linear process when viewed as progress in Euclidean space. it goes up to apex, comes back down. this is garuanteed by the smooth input of T, the analytical smoothness of the absolute value of the raw zeta function as well as the linear structure of the magnitude output.
+	b) why not 1/4 or 1/5?
+	as a fundamental rule of rotatation (the measurement that the raw zeta function measures) would not balance or return to balance because of the nature of the smooth forward nature of the input/function/magnitude. the zeta function would be describing something floating off into space with no structure. as a single it would break it's symmetric cancellation pattern and would require a reason for this event to occur
+
+2) prove that no zero can live off the critical line at 0 at != 1/2
+	a) zero in isolation
+	as discussed earlier, zeros are a dfined series of cancellation pattern 0->1->0 for a zero to be 0 in any location. for a zero to happen in isolation ( a zero outside of the scope of this cancellation structure ) would have to happen outside of the scope of what this function can produce given it's inputs and outputs
+	b) multiple zeros
+	for multiple zeros to exists. this would imply a second cancellation pattern that exists simulltaneously to create two perfect cancellations. this would require 2 inputs or a different function.
+	
+HERE IS WHERE THE MATH EXPLAINATION SHOULD GO, EXPLAINING what's up above, my message shouldn't be softed, or changed, or conformed to fit an existing idea
+
+Through the reparameterization of the zeta function and projecting into euclidean space I expose the structure required for smooth continuous behavior.
